@@ -5813,11 +5813,6 @@ send_now:
 		goto send_now;
 	}
 
-	// I'm not sure this is the most elegant way to do this, instead I can
-	// set the ICSK_ACK_NOW - for now I'll leave is as it is
-	if ((inet_sk(sk)->rcv_tos & INET_DSCP_MASK) == (DSCP_AF12 << 2))
-		goto send_now;
-
 	tp->compressed_ack++;
 	if (hrtimer_is_queued(&tp->compressed_ack_timer))
 		return;
