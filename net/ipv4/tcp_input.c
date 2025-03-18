@@ -81,6 +81,7 @@
 #include <linux/jump_label_ratelimit.h>
 #include <net/busy_poll.h>
 #include <net/mptcp.h>
+#include <net/dscp.h>
 
 int sysctl_tcp_max_orphans __read_mostly = NR_FILE;
 
@@ -4306,6 +4307,12 @@ void tcp_parse_options(const struct net *net,
 
 				opt_rx->saw_unknown = 1;
 				break;
+			case TCPOPT_TRIMMING_PERM:
+				if (opsize == TCPOLEN_TRIMMING_PERM && th->syn &&
+					!estab && READ_ONCE(net->ipv4.sysctl_tcp_trimming)) {
+					opt_rx->trimming_ok = 1;
+				}
+				break;
 
 			default:
 				opt_rx->saw_unknown = 1;
@@ -5805,6 +5812,12 @@ send_now:
 		tp->dup_ack_counter++;
 		goto send_now;
 	}
+
+	// I'm not sure this is the most elegant way to do this, instead I can
+	// set the ICSK_ACK_NOW - for now I'll leave is as it is
+	if ((inet_sk(sk)->rcv_tos & INET_DSCP_MASK) == (DSCP_AF12 << 2))
+		goto send_now;
+
 	tp->compressed_ack++;
 	if (hrtimer_is_queued(&tp->compressed_ack_timer))
 		return;
@@ -6548,6 +6561,10 @@ consume:
 				   min(tp->window_clamp, 65535U));
 		}
 
+		if (tp->rx_opt.trimming_ok) {
+			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
+		}
+
 		if (tp->rx_opt.saw_tstamp) {
 			tp->rx_opt.tstamp_ok	   = 1;
 			tp->tcp_header_len =
@@ -6874,6 +6891,10 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 
 		tp->snd_una = TCP_SKB_CB(skb)->ack_seq;
 		tp->snd_wnd = ntohs(th->window) << tp->rx_opt.snd_wscale;
+		if (tp->rx_opt.trimming_ok) {
+			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
+		}
+
 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
 
 		if (tp->rx_opt.tstamp_ok)
@@ -7088,6 +7109,7 @@ static void tcp_openreq_init(struct request_sock *req,
 	ireq->sack_ok = rx_opt->sack_ok;
 	ireq->snd_wscale = rx_opt->snd_wscale;
 	ireq->wscale_ok = rx_opt->wscale_ok;
+	ireq->trimming_ok = rx_opt->trimming_ok;
 	ireq->acked = 0;
 	ireq->ecn_ok = 0;
 	ireq->ir_rmt_port = tcp_hdr(skb)->source;

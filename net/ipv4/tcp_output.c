@@ -39,6 +39,7 @@
 
 #include <net/tcp.h>
 #include <net/mptcp.h>
+#include <net/dscp.h>
 #include <net/proto_memory.h>
 
 #include <linux/compiler.h>
@@ -430,6 +431,8 @@ static inline bool tcp_urg_mode(const struct tcp_sock *tp)
 #define OPTION_SMC		BIT(9)
 #define OPTION_MPTCP		BIT(10)
 #define OPTION_AO		BIT(11)
+#define OPTION_TRIMMING_ADVERTISE	BIT(12)
+#define OPTION_TRIMMING_NACK	BIT(13)
 
 static void smc_options_write(__be32 *ptr, u16 *options)
 {
@@ -713,6 +716,20 @@ static void tcp_options_write(struct tcphdr *th, struct tcp_sock *tp,
 			       opts->ws);
 	}
 
+	if (unlikely(OPTION_TRIMMING_ADVERTISE & options)) {
+		*ptr++ = htonl((TCPOPT_NOP << 24) |
+			       (TCPOPT_NOP << 16) |
+			       (TCPOPT_TRIMMING_PERM << 8) |
+			       TCPOLEN_TRIMMING_PERM);
+	}
+
+	if (unlikely(OPTION_TRIMMING_NACK & options)) {
+		*ptr++ = htonl((TCPOPT_NOP << 24) |
+					(TCPOPT_NOP << 16) |
+					(TCPOPT_TRIMMING_NACK << 8) |
+					TCPOLEN_TRIMMING_NACK);
+	}
+
 	if (unlikely(opts->num_sack_blocks)) {
 		struct tcp_sack_block *sp = tp->rx_opt.dsack ?
 			tp->duplicate_sack : tp->selective_acks;
@@ -865,6 +882,13 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 			remaining -= TCPOLEN_SACKPERM_ALIGNED;
 	}
 
+	if (likely(READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming))) {
+		if (TCPOLEN_TRIMMING_PERM_ALIGNED <= remaining) {
+			opts->options |= OPTION_TRIMMING_ADVERTISE;
+			remaining -= TCPOLEN_TRIMMING_PERM_ALIGNED;
+		}
+	}
+
 	if (fastopen && fastopen->cookie.len >= 0) {
 		u32 need = fastopen->cookie.len;
 
@@ -949,6 +973,11 @@ static unsigned int tcp_synack_options(const struct sock *sk,
 		if (unlikely(!ireq->tstamp_ok))
 			remaining -= TCPOLEN_SACKPERM_ALIGNED;
 	}
+	if (likely(ireq->trimming_ok)) {
+		opts->options |= OPTION_TRIMMING_ADVERTISE;
+		remaining -= TCPOLEN_TRIMMING_PERM_ALIGNED;
+	}
+
 	if (foc != NULL && foc->len >= 0) {
 		u32 need = foc->len;
 
@@ -3889,6 +3918,9 @@ static void tcp_connect_init(struct sock *sk)
 	if (READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_timestamps))
 		tp->tcp_header_len += TCPOLEN_TSTAMP_ALIGNED;
 
+	if (READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming))
+		tp->tcp_header_len += TCPOLEN_TRIMMING_PERM_ALIGNED;
+
 	tcp_ao_connect_init(sk);
 
 	/* If user gave his TCP_MAXSEG, record it to clamp */
@@ -3924,6 +3956,7 @@ static void tcp_connect_init(struct sock *sk)
 				  rcv_wnd);
 
 	tp->rx_opt.rcv_wscale = rcv_wscale;
+	tp->rx_opt.trimming_ok = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming);
 	tp->rcv_ssthresh = tp->rcv_wnd;
 
 	WRITE_ONCE(sk->sk_err, 0);
