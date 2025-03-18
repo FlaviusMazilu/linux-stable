@@ -1048,6 +1048,16 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 		}
 	}
 
+	if (unlikely(tp->rx_opt.trimming_ok &&
+		(tp->trimming_flags & TCP_TRIMMING_QUEUE_NAK))) {
+			const unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
+			if (unlikely(remaining < TCPOLEN_TRIMMING_NACK_ALIGNED))
+				return size;
+			
+			opts->options |= OPTION_TRIMMING_NACK;
+			size += TCPOLEN_TRIMMING_NACK_ALIGNED;
+	}
+
 	eff_sacks = tp->rx_opt.num_sacks + tp->rx_opt.dsack;
 	if (unlikely(eff_sacks)) {
 		const unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
