@@ -1056,6 +1056,7 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 			
 			opts->options |= OPTION_TRIMMING_NACK;
 			size += TCPOLEN_TRIMMING_NACK_ALIGNED;
+		tp->trimming_flags &= ~TCP_TRIMMING_QUEUE_NAK;
 	}
 
 	eff_sacks = tp->rx_opt.num_sacks + tp->rx_opt.dsack;

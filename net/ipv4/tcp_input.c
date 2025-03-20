@@ -808,6 +808,15 @@ static void tcp_save_lrcv_flowlabel(struct sock *sk, const struct sk_buff *skb)
 #endif
 }
 
+void tcp_trimming_check(struct sock *sk, struct sk_buff *skb) {
+	if (!tcp_sk(sk)->rx_opt.trimming_ok)
+		return;
+
+	if ((TCP_SKB_CB(skb)->ip_dsfield & INET_DSCP_MASK) == (DSCP_AF12 << 2))
+		tcp_sk(sk)->trimming_flags |= TCP_TRIMMING_QUEUE_NAK;
+}
+
+
 /* There is something which you must keep in mind when you analyze the
  * behavior of the tp->ato delayed ack timeout interval.  When a
  * connection starts up, we want to ack as quickly as possible.  The
@@ -859,6 +868,7 @@ static void tcp_event_data_recv(struct sock *sk, struct sk_buff *skb)
 	tcp_save_lrcv_flowlabel(sk, skb);
 
 	tcp_ecn_check_ce(sk, skb);
+	tcp_trimming_check(sk, skb);
 
 	if (skb->len >= 128)
 		tcp_grow_window(sk, skb, true);
@@ -5027,6 +5037,7 @@ static void tcp_data_queue_ofo(struct sock *sk, struct sk_buff *skb)
 
 	tcp_save_lrcv_flowlabel(sk, skb);
 	tcp_ecn_check_ce(sk, skb);
+	tcp_trimming_check(sk, skb);
 
 	if (unlikely(tcp_try_rmem_schedule(sk, skb, skb->truesize))) {
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPOFODROP);
@@ -5812,6 +5823,8 @@ send_now:
 		tp->dup_ack_counter++;
 		goto send_now;
 	}
+	if (tp->trimming_flags & TCP_TRIMMING_QUEUE_NAK)
+		goto send_now;
 
 	tp->compressed_ack++;
 	if (hrtimer_is_queued(&tp->compressed_ack_timer))
