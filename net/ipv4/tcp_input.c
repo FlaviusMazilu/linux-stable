@@ -103,10 +103,11 @@ int sysctl_tcp_max_orphans __read_mostly = NR_FILE;
 #define FLAG_NO_CHALLENGE_ACK	0x8000 /* do not call tcp_send_challenge_ack()	*/
 #define FLAG_ACK_MAYBE_DELAYED	0x10000 /* Likely a delayed ACK */
 #define FLAG_DSACK_TLP		0x20000 /* DSACK for tail loss probe */
+#define FLAG_NAK		0x40000 /* NAK indicates loss */
 
 #define FLAG_ACKED		(FLAG_DATA_ACKED|FLAG_SYN_ACKED)
 #define FLAG_NOT_DUP		(FLAG_DATA|FLAG_WIN_UPDATE|FLAG_ACKED)
-#define FLAG_CA_ALERT		(FLAG_DATA_SACKED|FLAG_ECE|FLAG_DSACKING_ACK)
+#define FLAG_CA_ALERT		(FLAG_DATA_SACKED|FLAG_ECE|FLAG_DSACKING_ACK|FLAG_NAK)
 #define FLAG_FORWARD_PROGRESS	(FLAG_ACKED|FLAG_DATA_SACKED)
 
 #define TCP_REMNANT (TCP_FLAG_FIN|TCP_FLAG_URG|TCP_FLAG_SYN|TCP_FLAG_PSH)
@@ -2859,7 +2860,7 @@ static void tcp_non_congestion_loss_retransmit(struct sock *sk)
 		tp->undo_marker = 0;
 		tcp_set_ca_state(sk, TCP_CA_Loss);
 	}
-	tcp_xmit_retransmit_queue(sk);
+	tcp_xmit_retransmit_queue(sk);																																																																																																																																																																																(sk);
 }
 
 /* Do a simple retransmit without using the backoff mechanisms in
@@ -4012,6 +4013,12 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 			flag |= tcp_sacktag_write_queue(sk, skb, prior_snd_una,
 							&sack_state);
 
+		// TODO: check if NAK option is present
+		if (tp->rx_opt.trimming_ok & TCP_TRIMMING_SEEN_NAK) {
+			ack_ev_flags |= CA_ACK_NAK;
+			flag |= FLAG_NAK;
+		}
+
 		if (tcp_ecn_rcv_ecn_echo(tp, tcp_hdr(skb))) {
 			flag |= FLAG_ECE;
 			ack_ev_flags |= CA_ACK_ECE;
@@ -4323,7 +4330,12 @@ void tcp_parse_options(const struct net *net,
 					opt_rx->trimming_ok = 1;
 				}
 				break;
-
+			case TCPOPT_TRIMMING_NACK:
+				if (opsize == TCPOLEN_TRIMMING_NACK &&
+					estab && opt_rx->trimming_ok & TCP_TRIMMING_OK) {
+					opt_rx->trimming_ok |= TCP_TRIMMING_SEEN_NAK;
+				}
+				break;
 			default:
 				opt_rx->saw_unknown = 1;
 			}
@@ -5819,12 +5831,14 @@ send_now:
 		tp->compressed_ack_rcv_nxt = tp->rcv_nxt;
 		tp->dup_ack_counter = 0;
 	}
+	// don't count it as a fast retransmit
+	if (tp->rx_opt->trimming_ok & TCP_TRIMMING_QUEUE_NAK)
+		goto send_now;
+
 	if (tp->dup_ack_counter < TCP_FASTRETRANS_THRESH) {
 		tp->dup_ack_counter++;
 		goto send_now;
 	}
-	if (tp->trimming_flags & TCP_TRIMMING_QUEUE_NAK)
-		goto send_now;
 
 	tp->compressed_ack++;
 	if (hrtimer_is_queued(&tp->compressed_ack_timer))

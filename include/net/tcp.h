@@ -383,7 +383,9 @@ static inline void tcp_dec_quickack_mode(struct sock *sk)
 #define	TCP_ECN_DEMAND_CWR	4
 #define	TCP_ECN_SEEN		8
 
-#define TCP_TRIMMING_QUEUE_NAK 1
+#define TCP_TRIMMING_OK 	1
+#define TCP_TRIMMING_QUEUE_NAK 2
+#define TCP_TRIMMING_SEEN_NAK 4
 
 enum tcp_tw_status {
 	TCP_TW_SUCCESS = 0,
@@ -1120,6 +1122,7 @@ enum tcp_ca_ack_event_flags {
 	CA_ACK_SLOWPATH		= (1 << 0),	/* In slow path processing */
 	CA_ACK_WIN_UPDATE	= (1 << 1),	/* ACK updated window */
 	CA_ACK_ECE		= (1 << 2),	/* ECE bit is set on ack */
+	CA_ACK_NAK		= (1 << 3),	/* NAK event */
 };
 
 /*
