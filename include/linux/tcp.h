@@ -128,6 +128,7 @@ struct tcp_options_received {
 	u8	num_sacks;	/* Number of SACK blocks		*/
 	u16	user_mss;	/* mss requested by user in ioctl	*/
 	u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
+	u32 rcv_nack;
 };
 
 static inline void tcp_clear_options(struct tcp_options_received *rx_opt)
@@ -414,6 +415,8 @@ struct tcp_sock {
 	struct tcp_sack_block selective_acks[4]; /* The SACKS themselves*/
 
 	struct tcp_sack_block recv_sack_cache[4];
+
+	u32 nack_seq; /* end_seq of the trimmed packet */
 
 	int     lost_cnt_hint;
 

@@ -728,6 +728,7 @@ static void tcp_options_write(struct tcphdr *th, struct tcp_sock *tp,
 					(TCPOPT_NOP << 16) |
 					(TCPOPT_TRIMMING_NACK << 8) |
 					TCPOLEN_TRIMMING_NACK);
+		*ptr++ = htonl(tp->nack_seq);
 	}
 
 	if (unlikely(opts->num_sack_blocks)) {
@@ -1048,15 +1049,15 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 		}
 	}
 
-	if (unlikely(tp->rx_opt.trimming_ok &&
-		(tp->trimming_flags & TCP_TRIMMING_QUEUE_NAK))) {
+	if (tp->rx_opt.trimming_ok &&
+		(tp->trimming_flags & TCP_TRIMMING_QUEUE_NACK)) {
 			const unsigned int remaining = MAX_TCP_OPTION_SPACE - size;
 			if (unlikely(remaining < TCPOLEN_TRIMMING_NACK_ALIGNED))
 				return size;
 			
 			opts->options |= OPTION_TRIMMING_NACK;
 			size += TCPOLEN_TRIMMING_NACK_ALIGNED;
-		tp->trimming_flags &= ~TCP_TRIMMING_QUEUE_NAK;
+		tp->trimming_flags &= ~TCP_TRIMMING_QUEUE_NACK;
 	}
 
 	eff_sacks = tp->rx_opt.num_sacks + tp->rx_opt.dsack;

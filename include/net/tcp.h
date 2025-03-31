@@ -223,7 +223,7 @@ static_assert((1 << ATO_BITS) > TCP_DELACK_MAX);
 #define TCPOLEN_EXP_FASTOPEN_BASE  4
 #define TCPOLEN_EXP_SMC_BASE   6
 #define TCPOLEN_TRIMMING_PERM 2
-#define TCPOLEN_TRIMMING_NACK 2
+#define TCPOLEN_TRIMMING_NACK 6
 
 /* But this is what stacks really send out. */
 #define TCPOLEN_TSTAMP_ALIGNED		12
@@ -236,7 +236,7 @@ static_assert((1 << ATO_BITS) > TCP_DELACK_MAX);
 #define TCPOLEN_MSS_ALIGNED		4
 #define TCPOLEN_EXP_SMC_BASE_ALIGNED	8
 #define TCPOLEN_TRIMMING_PERM_ALIGNED	4
-#define TCPOLEN_TRIMMING_NACK_ALIGNED	4
+#define TCPOLEN_TRIMMING_NACK_ALIGNED	8
 
 /* Flags in tp->nonagle */
 #define TCP_NAGLE_OFF		1	/* Nagle's algo is disabled */
@@ -384,8 +384,8 @@ static inline void tcp_dec_quickack_mode(struct sock *sk)
 #define	TCP_ECN_SEEN		8
 
 #define TCP_TRIMMING_OK 	1
-#define TCP_TRIMMING_QUEUE_NAK 2
-#define TCP_TRIMMING_SEEN_NAK 4
+#define TCP_TRIMMING_QUEUE_NACK 2
+#define TCP_TRIMMING_SEEN_NACK 4
 
 enum tcp_tw_status {
 	TCP_TW_SUCCESS = 0,

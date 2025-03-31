@@ -814,7 +814,8 @@ static void tcp_trimming_check(struct sock *sk, struct sk_buff *skb) {
 		return;
 
 	if ((TCP_SKB_CB(skb)->ip_dsfield & INET_DSCP_MASK) == (DSCP_AF12 << 2)) {
-		tcp_sk(sk)->trimming_flags |= TCP_TRIMMING_QUEUE_NAK;
+		tcp_sk(sk)->trimming_flags |= TCP_TRIMMING_QUEUE_NACK;
+		tcp_sk(sk)->nack_seq = TCP_SKB_CB(skb)->end_seq;
 		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
 	}
 }
@@ -3046,19 +3047,34 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una,
 	return false;
 }
 
+static void tcp_trimming_mark_lost(struct sock *sk)
+{
+	struct sk_buff *skb = tcp_rtx_queue_head(sk);
+	if (!skb) {
+		printk(KERN_DEBUG "NAK: rtx queue is empty");
+		WARN_ON(!skb);
+		return;
+	}
+	skb_rbtree_walk_from(skb) {
+		if (!before(tcp_sk(sk)->rx_opt.rcv_nack, TCP_SKB_CB(skb)->seq) &&
+			before(tcp_sk(sk)->rx_opt.rcv_nack, TCP_SKB_CB(skb)->end_seq)) {
+				tcp_mark_skb_lost(sk, skb);
+				printk(KERN_DEBUG "NAK: mark packet as lost");
+				return;
+			}
+	}
+	printk(KERN_DEBUG "NAK: found no lost packet to mark");
+}
+
 static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
 	if (tcp_rtx_queue_empty(sk))
 		return;
-
+	
 	if (*ack_flag & FLAG_NAK) {
-		struct sk_buff *skb = tcp_rtx_queue_head(sk);
-		if (skb) {
-			tcp_mark_skb_lost(sk, skb);
-			printk(KERN_DEBUG "NAK: mark packet as lost");
-		}
+		tcp_trimming_mark_lost(sk);
 	}
 
 	if (unlikely(tcp_is_reno(tp))) {
@@ -4027,8 +4043,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 			flag |= tcp_sacktag_write_queue(sk, skb, prior_snd_una,
 							&sack_state);
 
-		// TODO: check if NAK option is present
-		if (tp->rx_opt.trimming_ok & TCP_TRIMMING_SEEN_NAK) {
+		if (tp->rx_opt.trimming_ok & TCP_TRIMMING_SEEN_NACK) {
 			ack_ev_flags |= CA_ACK_NAK;
 			flag |= FLAG_NAK;
 		}
@@ -4341,13 +4356,14 @@ void tcp_parse_options(const struct net *net,
 			case TCPOPT_TRIMMING_PERM:
 				if (opsize == TCPOLEN_TRIMMING_PERM && th->syn &&
 					!estab && READ_ONCE(net->ipv4.sysctl_tcp_trimming)) {
-					opt_rx->trimming_ok = 1;
+					opt_rx->trimming_ok = TCP_TRIMMING_OK;
 				}
 				break;
 			case TCPOPT_TRIMMING_NACK:
 				if (opsize == TCPOLEN_TRIMMING_NACK &&
 					estab && opt_rx->trimming_ok & TCP_TRIMMING_OK) {
-					opt_rx->trimming_ok |= TCP_TRIMMING_SEEN_NAK;
+					opt_rx->trimming_ok |= TCP_TRIMMING_SEEN_NACK;
+					opt_rx->rcv_nack = get_unaligned_be32(ptr);
 				}
 				break;
 			default:
@@ -5845,7 +5861,7 @@ send_now:
 		tp->compressed_ack_rcv_nxt = tp->rcv_nxt;
 		tp->dup_ack_counter = 0;
 	}
-	
+
 	if (tp->dup_ack_counter < TCP_FASTRETRANS_THRESH) {
 		tp->dup_ack_counter++;
 		goto send_now;
