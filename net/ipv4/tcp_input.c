@@ -809,12 +809,14 @@ static void tcp_save_lrcv_flowlabel(struct sock *sk, const struct sk_buff *skb)
 #endif
 }
 
-void tcp_trimming_check(struct sock *sk, struct sk_buff *skb) {
+static void tcp_trimming_check(struct sock *sk, struct sk_buff *skb) {
 	if (!tcp_sk(sk)->rx_opt.trimming_ok)
 		return;
 
-	if ((TCP_SKB_CB(skb)->ip_dsfield & INET_DSCP_MASK) == (DSCP_AF12 << 2))
+	if ((TCP_SKB_CB(skb)->ip_dsfield & INET_DSCP_MASK) == (DSCP_AF12 << 2)) {
 		tcp_sk(sk)->trimming_flags |= TCP_TRIMMING_QUEUE_NAK;
+		// tcp_enter_quickack_mode(sk, 2);
+	}
 }
 
 
@@ -2313,7 +2315,7 @@ static inline int tcp_dupack_heuristics(const struct tcp_sock *tp)
  *	* SACK
  *	* Duplicate ACK.
  *	* ECN ECE.
- *
+ *	* NAK 
  * Counting packets in flight is pretty simple.
  *
  *	in_flight = packets_out - left_out + retrans_out
@@ -3051,6 +3053,14 @@ static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
 	if (tcp_rtx_queue_empty(sk))
 		return;
 
+	if (*ack_flag & FLAG_NAK) {
+		struct sk_buff *skb = tcp_rtx_queue_head(sk);
+		if (skb) {
+			tcp_mark_skb_lost(sk, skb);
+			printk(KERN_DEBUG "NAK: mark packet as lost");
+		}
+	}
+
 	if (unlikely(tcp_is_reno(tp))) {
 		tcp_newreno_mark_lost(sk, *ack_flag & FLAG_SND_UNA_ADVANCED);
 	} else if (tcp_is_rack(sk)) {
@@ -3159,6 +3169,7 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 		/* Change state if cwnd is undone or retransmits are lost */
 		fallthrough;
 	default:
+		printk(KERN_DEBUG "tcp: fastretrans_alert CA_OPEN start\n");
 		if (tcp_is_reno(tp)) {
 			if (flag & FLAG_SND_UNA_ADVANCED)
 				tcp_reset_reno_sack(tp);
@@ -3171,6 +3182,7 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 		tcp_identify_packet_loss(sk, ack_flag);
 		if (!tcp_time_to_recover(sk, flag)) {
 			tcp_try_to_open(sk, flag);
+			printk(KERN_DEBUG "tcp: tcp_time_to_recover returned false\n");
 			return;
 		}
 
@@ -3182,10 +3194,12 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 			/* Restores the reduction we did in tcp_mtup_probe() */
 			tcp_snd_cwnd_set(tp, tcp_snd_cwnd(tp) + 1);
 			tcp_simple_retransmit(sk);
+			printk(KERN_DEBUG "tcp: MTU probe failure, don't reduce cwnd\n");
 			return;
 		}
-
+		// TODO: check if entered recovery state
 		/* Otherwise enter Recovery state */
+		printk(KERN_DEBUG "tcp: enter recovery\n");
 		tcp_enter_recovery(sk, ece_ack);
 		fast_rexmit = 1;
 	}
@@ -5832,7 +5846,7 @@ send_now:
 		tp->dup_ack_counter = 0;
 	}
 	// don't count it as a fast retransmit
-	if (tp->rx_opt->trimming_ok & TCP_TRIMMING_QUEUE_NAK)
+	if (tp->rx_opt.trimming_ok & TCP_TRIMMING_QUEUE_NAK)
 		goto send_now;
 
 	if (tp->dup_ack_counter < TCP_FASTRETRANS_THRESH) {
