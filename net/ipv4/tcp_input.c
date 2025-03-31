@@ -815,7 +815,7 @@ static void tcp_trimming_check(struct sock *sk, struct sk_buff *skb) {
 
 	if ((TCP_SKB_CB(skb)->ip_dsfield & INET_DSCP_MASK) == (DSCP_AF12 << 2)) {
 		tcp_sk(sk)->trimming_flags |= TCP_TRIMMING_QUEUE_NAK;
-		// tcp_enter_quickack_mode(sk, 2);
+		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
 	}
 }
 
@@ -5845,10 +5845,7 @@ send_now:
 		tp->compressed_ack_rcv_nxt = tp->rcv_nxt;
 		tp->dup_ack_counter = 0;
 	}
-	// don't count it as a fast retransmit
-	if (tp->rx_opt.trimming_ok & TCP_TRIMMING_QUEUE_NAK)
-		goto send_now;
-
+	
 	if (tp->dup_ack_counter < TCP_FASTRETRANS_THRESH) {
 		tp->dup_ack_counter++;
 		goto send_now;
