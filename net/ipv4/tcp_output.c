@@ -3968,7 +3968,6 @@ static void tcp_connect_init(struct sock *sk)
 				  rcv_wnd);
 
 	tp->rx_opt.rcv_wscale = rcv_wscale;
-	tp->rx_opt.trimming_ok = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming);
 	tp->rcv_ssthresh = tp->rcv_wnd;
 
 	WRITE_ONCE(sk->sk_err, 0);
