@@ -814,7 +814,7 @@ static void tcp_trimming_check(struct sock *sk, struct sk_buff *skb) {
 		return;
 
 	if ((TCP_SKB_CB(skb)->ip_dsfield & INET_DSCP_MASK) == (DSCP_AF12 << 2)) {
-		tcp_sk(sk)->trimming_flags |= TCP_TRIMMING_QUEUE_NACK;
+		tcp_sk(sk)->rx_opt.trimming_ok |= TCP_TRIMMING_QUEUE_NACK;
 		tcp_sk(sk)->nack_seq = TCP_SKB_CB(skb)->end_seq;
 		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
 	}
