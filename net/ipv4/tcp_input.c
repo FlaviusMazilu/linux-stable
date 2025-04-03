@@ -6133,6 +6133,14 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int len = skb->len;
 
+	printk(KERN_DEBUG "tcp_rcv_established: INTRO\n" );
+	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) { // TRIMMED PACKET
+		__kfree_skb(skb);
+		// send ack with NACK option
+		printk(KERN_DEBUG "tcp_rcv_established: TRIMMED PACKET found, returning without sending ack\n" );
+		return;
+	}
+
 	/* TCP congestion window tracking */
 	trace_tcp_probe(sk, skb);
 

@@ -71,6 +71,7 @@
 #include <net/secure_seq.h>
 #include <net/busy_poll.h>
 #include <net/rstreason.h>
+#include <net/dscp.h>
 
 #include <linux/inet.h>
 #include <linux/ipv6.h>
@@ -2213,8 +2214,21 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * provided case of th->doff==0 is eliminated.
 	 * So, we defer the checks. */
 
-	if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo))
-		goto csum_error;
+	printk(KERN_INFO "Before! csum_valid=%d, csum=%d, ip_summed=%d, csum_level=%d, skb_len=%d\n", skb->csum_valid, skb->csum, skb->ip_summed, skb->csum_level, skb->len);
+	if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo)) {
+		printk(KERN_INFO "Csum_err! csum_valid=%d, csum=%d, ip_summed=%d, csum_level=%d, skb_len=%d \n", skb->csum_valid, skb->csum, skb->ip_summed, skb->csum_level, skb->len);
+		if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) { // TRIMMED PACKET, checksum wrong, mark it as good
+			// It might be a better idea to use some special flag to indentify this type of packet
+			// so it can bea easily identified in the future (for example in tcp_rcv_established, where
+			// the only check made is for dscp value, which might in the future be used for other packets
+			// as well)
+			skb->csum_valid = 1;
+			skb->csum = 0;
+			skb->ip_summed = CHECKSUM_COMPLETE; //  not sure this is correct
+			printk(KERN_INFO "TRIM CAUGHT! csum_valid=%d, csum=%d, ip_summed=%d, csum_level=%d, skb_len=%d \n", skb->csum_valid, skb->csum, skb->ip_summed, skb->csum_level, skb->len);
+		} else
+			goto csum_error;
+	}
 
 	th = (const struct tcphdr *)skb->data;
 	iph = ip_hdr(skb);
