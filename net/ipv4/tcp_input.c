@@ -6132,6 +6132,12 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) { // TRIMMED PACKET
 		__kfree_skb(skb);
 		// send ack with NACK option
+		// set ICSK_ACK_NOW
+		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
+		// set option flag
+		tcp_sk(sk)->trimming_send_nak = 1;
+		// cal tcp_ack_snd_check
+		__tcp_ack_snd_check(sk, 0);
 		printk(KERN_DEBUG "tcp_rcv_established: TRIMMED PACKET found, returning without sending ack\n" );
 		return;
 	}

@@ -728,6 +728,8 @@ static void tcp_options_write(struct tcphdr *th, struct tcp_sock *tp,
 					(TCPOPT_NOP << 16) |
 					(TCPOPT_TRIMMING_NACK << 8) |
 					TCPOLEN_TRIMMING_NACK);
+
+		*ptr++ = htonl(th->ack_seq);
 	}
 
 	if (unlikely(opts->num_sack_blocks)) {
@@ -1013,6 +1015,12 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 	unsigned int eff_sacks;
 
 	opts->options = 0;
+
+	if(tp->trimming_send_nak) {
+		opts->options |= OPTION_TRIMMING_NACK;
+		size += TCPOLEN_TRIMMING_NACK_ALIGNED;
+		tp->trimming_send_nak = 0;
+	}
 
 	/* Better than switch (key.type) as it has static branches */
 	if (tcp_key_is_md5(key)) {
