@@ -1016,7 +1016,7 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 
 	opts->options = 0;
 
-	if(tp->trimming_send_nak) {
+	if(unlikely(tp->trimming_send_nak)) {
 		opts->options |= OPTION_TRIMMING_NACK;
 		size += TCPOLEN_TRIMMING_NACK_ALIGNED;
 		tp->trimming_send_nak = 0;
