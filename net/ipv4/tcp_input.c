@@ -103,10 +103,11 @@ int sysctl_tcp_max_orphans __read_mostly = NR_FILE;
 #define FLAG_NO_CHALLENGE_ACK	0x8000 /* do not call tcp_send_challenge_ack()	*/
 #define FLAG_ACK_MAYBE_DELAYED	0x10000 /* Likely a delayed ACK */
 #define FLAG_DSACK_TLP		0x20000 /* DSACK for tail loss probe */
+#define FLAG_NACK		0x40000 /* NAK indicates loss */
 
 #define FLAG_ACKED		(FLAG_DATA_ACKED|FLAG_SYN_ACKED)
 #define FLAG_NOT_DUP		(FLAG_DATA|FLAG_WIN_UPDATE|FLAG_ACKED)
-#define FLAG_CA_ALERT		(FLAG_DATA_SACKED|FLAG_ECE|FLAG_DSACKING_ACK)
+#define FLAG_CA_ALERT		(FLAG_DATA_SACKED|FLAG_ECE|FLAG_DSACKING_ACK|FLAG_NACK)
 #define FLAG_FORWARD_PROGRESS	(FLAG_ACKED|FLAG_DATA_SACKED)
 
 #define TCP_REMNANT (TCP_FLAG_FIN|TCP_FLAG_URG|TCP_FLAG_SYN|TCP_FLAG_PSH)
@@ -3033,12 +3034,39 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una,
 	return false;
 }
 
+
+static void tcp_trimming_mark_lost(struct sock *sk)
+{
+	struct sk_buff *skb = tcp_rtx_queue_head(sk);
+
+	if (!skb) {
+ 		printk(KERN_DEBUG "NAK: rtx queue is empty");
+ 		WARN_ON(!skb);
+ 		return;
+ 	}
+
+	skb_rbtree_walk_from(skb) {
+		printk(KERN_DEBUG "NAK:nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
+ 		if (!before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq) &&
+ 			before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->end_seq)) {
+ 				tcp_mark_skb_lost(sk, skb);
+ 				printk(KERN_DEBUG "NAK: mark packet as lost");
+ 				return;
+ 			}
+ 	}
+ 	printk(KERN_DEBUG "NAK: found no lost packet to mark");
+}
+
 static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
 	if (tcp_rtx_queue_empty(sk))
 		return;
+
+	if (*ack_flag & FLAG_NACK) {
+		tcp_trimming_mark_lost(sk);
+	}
 
 	if (unlikely(tcp_is_reno(tp))) {
 		tcp_newreno_mark_lost(sk, *ack_flag & FLAG_SND_UNA_ADVANCED);
@@ -4014,6 +4042,12 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 		if (flag & FLAG_WIN_UPDATE)
 			ack_ev_flags |= CA_ACK_WIN_UPDATE;
 
+		if (tp->rx_opt.trimming_nack_rcvd) {
+			ack_ev_flags |= CA_ACK_NACK;
+			flag |= FLAG_NACK;
+			tp->rx_opt.trimming_nack_rcvd = false;
+		}
+
 		tcp_in_ack_event(sk, ack_ev_flags);
 	}
 
@@ -4269,6 +4303,7 @@ void tcp_parse_options(const struct net *net,
 					TCP_SKB_CB(skb)->sacked = (ptr - 2) - (unsigned char *)th;
 				}
 				break;
+
 #ifdef CONFIG_TCP_MD5SIG
 			case TCPOPT_MD5SIG:
 				/* The MD5 Hash has already been
@@ -4313,6 +4348,14 @@ void tcp_parse_options(const struct net *net,
 					opt_rx->trimming_ok = 1;
 				}
 				break;
+			case TCPOPT_TRIMMING_NACK:
+				if (opsize == TCPOLEN_TRIMMING_NACK &&
+					estab &&
+					opt_rx->trimming_ok) {
+						opt_rx->trimming_nack_rcvd = 1;
+						opt_rx->nack_seq = ntohl(get_unaligned_be32(ptr));
+					}
+				break;
 
 			default:
 				opt_rx->saw_unknown = 1;
@@ -4320,6 +4363,11 @@ void tcp_parse_options(const struct net *net,
 			ptr += opsize-2;
 			length -= opsize;
 		}
+	}
+
+	if(opt_rx->trimming_nack_rcvd) {
+		printk(KERN_DEBUG "NACK_RCVD: trimming_nack_seq = %u\n",
+			opt_rx->nack_seq);
 	}
 }
 EXPORT_SYMBOL(tcp_parse_options);
