@@ -2863,7 +2863,7 @@ static void tcp_non_congestion_loss_retransmit(struct sock *sk)
 		tp->undo_marker = 0;
 		tcp_set_ca_state(sk, TCP_CA_Loss);
 	}
-	tcp_xmit_retransmit_queue(sk);																																																																																																																																																																																(sk);
+	tcp_xmit_retransmit_queue(sk);
 }
 
 /* Do a simple retransmit without using the backoff mechanisms in
@@ -3068,7 +3068,7 @@ static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
 
 	if (tcp_rtx_queue_empty(sk))
 		return;
-	
+
 	if (*ack_flag & FLAG_NAK) {
 		tcp_trimming_mark_lost(sk);
 	}
