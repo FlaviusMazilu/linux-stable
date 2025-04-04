@@ -4353,7 +4353,7 @@ void tcp_parse_options(const struct net *net,
 					estab &&
 					opt_rx->trimming_ok) {
 						opt_rx->trimming_nack_rcvd = 1;
-						opt_rx->nack_seq = ntohl(get_unaligned_be32(ptr));
+						opt_rx->nack_seq = get_unaligned_be32(ptr);
 					}
 				break;
 
@@ -6184,6 +6184,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
 		// set option flag
 		tcp_sk(sk)->trimming_send_nak = 1;
+		tcp_sk(sk)->nack_seq_to_send = TCP_SKB_CB(skb)->seq;
 		// cal tcp_ack_snd_check
 		__tcp_ack_snd_check(sk, 0);
 		printk(KERN_DEBUG "tcp_rcv_established: TRIMMED PACKET found, returning without sending ack\n" );

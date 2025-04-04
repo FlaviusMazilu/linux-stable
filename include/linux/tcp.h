@@ -388,6 +388,7 @@ struct tcp_sock {
 
 	u8	keepalive_probes; /* num of allowed keep alive probes	*/
 	u32	tcp_tx_delay;	/* delay (in usec) added to TX packets */
+	u32 nack_seq_to_send; /* seq# to send NACK for TCP_TRIMMING */
 
 /* RTT measurement */
 	u32	mdev_max_us;	/* maximal mdev for the last rtt period	*/

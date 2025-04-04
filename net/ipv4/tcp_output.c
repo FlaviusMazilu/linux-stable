@@ -729,7 +729,7 @@ static void tcp_options_write(struct tcphdr *th, struct tcp_sock *tp,
 					(TCPOPT_TRIMMING_NACK << 8) |
 					TCPOLEN_TRIMMING_NACK);
 
-		*ptr++ = htonl(th->ack_seq);
+		*ptr++ = htonl(tp->nack_seq_to_send);
 	}
 
 	if (unlikely(opts->num_sack_blocks)) {
