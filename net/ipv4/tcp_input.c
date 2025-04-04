@@ -3185,7 +3185,6 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 		/* Change state if cwnd is undone or retransmits are lost */
 		fallthrough;
 	default:
-		printk(KERN_DEBUG "tcp: fastretrans_alert CA_OPEN start\n");
 		if (tcp_is_reno(tp)) {
 			if (flag & FLAG_SND_UNA_ADVANCED)
 				tcp_reset_reno_sack(tp);
@@ -3198,7 +3197,6 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 		tcp_identify_packet_loss(sk, ack_flag);
 		if (!tcp_time_to_recover(sk, flag)) {
 			tcp_try_to_open(sk, flag);
-			printk(KERN_DEBUG "tcp: tcp_time_to_recover returned false\n");
 			return;
 		}
 
@@ -3210,12 +3208,9 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 			/* Restores the reduction we did in tcp_mtup_probe() */
 			tcp_snd_cwnd_set(tp, tcp_snd_cwnd(tp) + 1);
 			tcp_simple_retransmit(sk);
-			printk(KERN_DEBUG "tcp: MTU probe failure, don't reduce cwnd\n");
 			return;
 		}
-		// TODO: check if entered recovery state
 		/* Otherwise enter Recovery state */
-		printk(KERN_DEBUG "tcp: enter recovery\n");
 		tcp_enter_recovery(sk, ece_ack);
 		fast_rexmit = 1;
 	}
