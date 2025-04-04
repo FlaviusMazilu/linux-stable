@@ -3050,11 +3050,7 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una,
 static void tcp_trimming_mark_lost(struct sock *sk)
 {
 	struct sk_buff *skb = tcp_rtx_queue_head(sk);
-	if (!skb) {
-		printk(KERN_DEBUG "NAK: rtx queue is empty");
-		WARN_ON(!skb);
-		return;
-	}
+
 	skb_rbtree_walk_from(skb) {
 		if (!before(tcp_sk(sk)->rx_opt.rcv_nack, TCP_SKB_CB(skb)->seq) &&
 			before(tcp_sk(sk)->rx_opt.rcv_nack, TCP_SKB_CB(skb)->end_seq)) {
