@@ -3040,21 +3040,21 @@ static void tcp_trimming_mark_lost(struct sock *sk)
 	struct sk_buff *skb = tcp_rtx_queue_head(sk);
 
 	if (!skb) {
- 		printk(KERN_DEBUG "NAK: rtx queue is empty");
+ 		// printk(KERN_DEBUG "NAK: rtx queue is empty");
  		WARN_ON(!skb);
  		return;
  	}
 
 	skb_rbtree_walk_from(skb) {
-		printk(KERN_DEBUG "NAK:nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
+		// printk(KERN_DEBUG "NAK:nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
  		if (!before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq) &&
  			before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->end_seq)) {
  				tcp_mark_skb_lost(sk, skb);
- 				printk(KERN_DEBUG "NAK: mark packet as lost");
+ 				// printk(KERN_DEBUG "NAK: mark packet as lost");
  				return;
  			}
  	}
- 	printk(KERN_DEBUG "NAK: found no lost packet to mark");
+ 	// printk(KERN_DEBUG "NAK: found no lost packet to mark");
 }
 
 static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
@@ -4366,8 +4366,8 @@ void tcp_parse_options(const struct net *net,
 	}
 
 	if(opt_rx->trimming_nack_rcvd) {
-		printk(KERN_DEBUG "NACK_RCVD: trimming_nack_seq = %u\n",
-			opt_rx->nack_seq);
+		// printk(KERN_DEBUG "NACK_RCVD: trimming_nack_seq = %u\n",
+			// opt_rx->nack_seq);
 	}
 }
 EXPORT_SYMBOL(tcp_parse_options);
@@ -6176,7 +6176,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int len = skb->len;
 
-	printk(KERN_DEBUG "tcp_rcv_established: INTRO\n" );
+	// printk(KERN_DEBUG "tcp_rcv_established: INTRO\n" );
 	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) { // TRIMMED PACKET
 		__kfree_skb(skb);
 		// send ack with NACK option
@@ -6187,7 +6187,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 		tcp_sk(sk)->nack_seq_to_send = TCP_SKB_CB(skb)->seq;
 		// cal tcp_ack_snd_check
 		__tcp_ack_snd_check(sk, 0);
-		printk(KERN_DEBUG "tcp_rcv_established: TRIMMED PACKET found, returning without sending ack\n" );
+		// printk(KERN_DEBUG "tcp_rcv_established: TRIMMED PACKET found, returning without sending ack\n" );
 		return;
 	}
 

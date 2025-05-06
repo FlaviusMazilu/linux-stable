@@ -2214,15 +2214,14 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * provided case of th->doff==0 is eliminated.
 	 * So, we defer the checks. */
 
-	 if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) {
+	// printk(KERN_INFO "Before! skb_prio=%d, csum_valid=%d, csum=%d, ip_summed=%d, csum_level=%d, skb_len=%d\n", skb->priority, skb->csum_valid, skb->csum, skb->ip_summed, skb->csum_level, skb->len);
+	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) {
 		// TRIMMED PACKET, We know that the checksum is invalid so no CHECSUM_UNNECESARRY is present
 		// so i think it's safe to set this flag
 		skb->csum_valid = 1;
-	 }
-
-	// printk(KERN_INFO "Before! csum_valid=%d, csum=%d, ip_summed=%d, csum_level=%d, skb_len=%d\n", skb->csum_valid, skb->csum, skb->ip_summed, skb->csum_level, skb->len);
-	if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo)) {
-				goto csum_error;
+	} else if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo)) {
+		// printk(KERN_ERR "skb_checksum_init failed; seq=%d\n", ntohl(th->seq));
+		goto csum_error;
 	}
 
 	th = (const struct tcphdr *)skb->data;
