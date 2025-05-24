@@ -4037,6 +4037,7 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 		if (tp->rx_opt.trimming_ok & TCP_TRIMMING_SEEN_NACK) {
 			ack_ev_flags |= CA_ACK_NAK;
 			flag |= FLAG_NAK;
+			tp->rx_opt.trimming_ok &= ~TCP_TRIMMING_SEEN_NACK;
 		}
 
 		if (tcp_ecn_rcv_ecn_echo(tp, tcp_hdr(skb))) {
