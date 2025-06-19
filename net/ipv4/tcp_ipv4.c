@@ -2214,11 +2214,16 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * provided case of th->doff==0 is eliminated.
 	 * So, we defer the checks. */
 
-	// printk(KERN_INFO "Before! skb_prio=%d, csum_valid=%d, csum=%d, ip_summed=%d, csum_level=%d, skb_len=%d\n", skb->priority, skb->csum_valid, skb->csum, skb->ip_summed, skb->csum_level, skb->len);
+	printk(KERN_INFO "Before! skb_prio=%d, csum_valid=%d, csum=%d, ip_summed=%d, csum_level=%d, skb_len=%d\n", skb->priority, skb->csum_valid, skb->csum, skb->ip_summed, skb->csum_level, skb->len);
 	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) {
-		// TRIMMED PACKET, We know that the checksum is invalid so no CHECSUM_UNNECESARRY is present
-		// so i think it's safe to set this flag
+		// TRIMMED PACKET, this packet can have the flag set to CHECKSUM_UNNECESSARY,
+		// when the packet has a length smaller than TRIM_THRESHOLD.
 		skb->csum_valid = 1;
+		if(skb->ip_summed == CHECKSUM_UNNECESSARY) {
+			// printk(KERN_ERR "skb->ip_summed is CHECKSUM_UNNECESSARY, setting it to CHECKSUM_NONE\n");
+			// correctly decrement the checksum unnecessary counter if this packet has a correct checksum
+			__skb_decr_checksum_unnecessary(skb);
+		}
 	} else if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo)) {
 		// printk(KERN_ERR "skb_checksum_init failed; seq=%d\n", ntohl(th->seq));
 		goto csum_error;
@@ -2232,6 +2237,13 @@ lookup:
 			       th->dest, sdif, &refcounted);
 	if (!sk)
 		goto no_tcp_socket;
+
+	if(sk->sk_state != TCP_ESTABLISHED && iph->tos >> 2 == DSCP_AF12) {
+		// unexpected TRIMMED packet
+		printk(KERN_ERR "Unexpected TRIMMED packet, seq=%d, state=%d, skb_len=%d\n",
+		       ntohl(th->seq), sk->sk_state, skb->len);
+		goto discard_it;
+	}
 
 	if (sk->sk_state == TCP_TIME_WAIT)
 		goto do_time_wait;
