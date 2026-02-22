@@ -3044,30 +3044,40 @@ static void tcp_trimming_mark_lost(struct sock *sk)
         if (!before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq) &&
 		before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->end_seq)) {
 			mss = tcp_skb_mss(skb);
-			printk(KERN_DEBUG "NAK - nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
+			printk(KERN_DEBUG "NAK_INIT - nack seq %u skb seq %u end_seq %u, skb_pcount %u, skb->len %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, tcp_skb_pcount(skb), skb->len);
 
             if (tcp_skb_pcount(skb) <= 1 || skb->len <= mss) {
-                tcp_mark_skb_lost(sk, skb);
+				printk(KERN_DEBUG "NAKINITT- tcp_skb_pcount %u", tcp_skb_pcount(skb));
+				tcp_mark_skb_lost(sk, skb);
                 return;
             }
             
+			printk(KERN_DEBUG "NAK_FIRSTT - tcp_skb_pcount %u", tcp_skb_pcount(skb));
 			u32 len_first_packet = tcp_sk(sk)->rx_opt.nack_seq - TCP_SKB_CB(skb)->seq;
             if (len_first_packet == 0) {
+				printk(KERN_DEBUG "NAK_FIRST [retransmit from start of packet] - nack seq %u skb seq %u end_seq %u, skb_pcount %u, skb->len %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, tcp_skb_pcount(skb), skb->len);
                 tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, skb,
                              mss, mss, GFP_ATOMIC);
+
+				printk(KERN_DEBUG "NAK_FIRST [AFTER fragment] - nack seq %u skb seq %u end_seq %u, skb_pcount %u, skb->len %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, tcp_skb_pcount(skb), skb->len);
 
                 tcp_mark_skb_lost(sk, skb);
                 return;
             }
+			
+			printk(KERN_DEBUG "NAK_MIDDLE [retransmit from MIDDLE of packet] - nack seq %u skb seq %u end_seq %u, skb_pcount %u, skb->len %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, tcp_skb_pcount(skb), skb->len);
 
             tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, skb,
                          len_first_packet, mss, GFP_ATOMIC);
+
+			printk(KERN_DEBUG "NAK_MIDDLE [AFTER fragment, first packet] - nack seq %u skb seq %u end_seq %u, skb_pcount %u, skb->len %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq, tcp_skb_pcount(skb), skb->len);
 
             struct sk_buff *skb_nacked = skb_rb_next(skb);
             if (tcp_skb_pcount(skb_nacked) > 1 || skb_nacked->len > mss) {
                 tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, skb_nacked,
                              mss, mss, GFP_ATOMIC);
             }
+			printk(KERN_DEBUG "NAK_MIDDLE [AFTER fragment, retransmitted packet] - nack seq %u skb seq %u end_seq %u, skb_pcount %u, skb->len %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb_nacked)->seq, TCP_SKB_CB(skb_nacked)->end_seq, tcp_skb_pcount(skb_nacked) <= 1, skb_nacked->len);
 
             tcp_mark_skb_lost(sk, skb_nacked);
             return;
