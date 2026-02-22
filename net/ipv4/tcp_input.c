@@ -3037,24 +3037,42 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una,
 
 static void tcp_trimming_mark_lost(struct sock *sk)
 {
-	struct sk_buff *skb = tcp_rtx_queue_head(sk);
+    struct sk_buff *skb = tcp_rtx_queue_head(sk);
+    u32 mss;
 
-	if (!skb) {
- 		// printk(KERN_DEBUG "NAK: rtx queue is empty");
- 		WARN_ON(!skb);
- 		return;
- 	}
+    skb_rbtree_walk_from(skb) {
+        if (!before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq) &&
+		before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->end_seq)) {
+			mss = tcp_skb_mss(skb);
+			printk(KERN_DEBUG "NAK - nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
 
-	skb_rbtree_walk_from(skb) {
-		// printk(KERN_DEBUG "NAK:nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
- 		if (!before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq) &&
- 			before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->end_seq)) {
- 				tcp_mark_skb_lost(sk, skb);
- 				// printk(KERN_DEBUG "NAK: mark packet as lost");
- 				return;
- 			}
- 	}
- 	// printk(KERN_DEBUG "NAK: found no lost packet to mark");
+            if (tcp_skb_pcount(skb) <= 1 || skb->len <= mss) {
+                tcp_mark_skb_lost(sk, skb);
+                return;
+            }
+            
+			u32 len_first_packet = tcp_sk(sk)->rx_opt.nack_seq - TCP_SKB_CB(skb)->seq;
+            if (len_first_packet == 0) {
+                tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, skb,
+                             mss, mss, GFP_ATOMIC);
+
+                tcp_mark_skb_lost(sk, skb);
+                return;
+            }
+
+            tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, skb,
+                         len_first_packet, mss, GFP_ATOMIC);
+
+            struct sk_buff *skb_nacked = skb_rb_next(skb);
+            if (tcp_skb_pcount(skb_nacked) > 1 || skb_nacked->len > mss) {
+                tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, skb_nacked,
+                             mss, mss, GFP_ATOMIC);
+            }
+
+            tcp_mark_skb_lost(sk, skb_nacked);
+            return;
+        }
+    }
 }
 
 static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
