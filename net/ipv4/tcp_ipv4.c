@@ -2214,19 +2214,21 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * provided case of th->doff==0 is eliminated.
 	 * So, we defer the checks. */
 
-	printk(KERN_INFO "Before! skb_prio=%d, csum_valid=%d, csum=%d, ip_summed=%d, csum_level=%d, skb_len=%d\n", skb->priority, skb->csum_valid, skb->csum, skb->ip_summed, skb->csum_level, skb->len);
-	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) {
-		// TRIMMED PACKET, this packet can have the flag set to CHECKSUM_UNNECESSARY,
-		// when the packet has a length smaller than TRIM_THRESHOLD.
-		skb->csum_valid = 1;
-		if(skb->ip_summed == CHECKSUM_UNNECESSARY) {
-			// printk(KERN_ERR "skb->ip_summed is CHECKSUM_UNNECESSARY, setting it to CHECKSUM_NONE\n");
-			// correctly decrement the checksum unnecessary counter if this packet has a correct checksum
-			__skb_decr_checksum_unnecessary(skb);
+	if (tcp_v4_is_trimmed(skb)) {
+		TCP_SKB_CB(skb)->trimmed = 1;
+		// compute checksum right now
+		if(skb_checksum_validate(skb, IPPROTO_TCP, inet_compute_pseudo)) {
+			TCP_SKB_CB(skb)->cksum_valid = 0; // invalid csum
+			skb->csum_valid = 1; // bypass csum checks
+		} else {
+			TCP_SKB_CB(skb)->cksum_valid = 1;
 		}
-	} else if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo)) {
-		// printk(KERN_ERR "skb_checksum_init failed; seq=%d\n", ntohl(th->seq));
-		goto csum_error;
+	} else {
+		if (skb_checksum_init(skb, IPPROTO_TCP, inet_compute_pseudo)) {
+			goto csum_error;
+		} else {
+			TCP_SKB_CB(skb)->cksum_valid = 1;
+		}
 	}
 
 	th = (const struct tcphdr *)skb->data;
@@ -2238,12 +2240,21 @@ lookup:
 	if (!sk)
 		goto no_tcp_socket;
 
-	if(sk->sk_state != TCP_ESTABLISHED && iph->tos >> 2 == DSCP_AF12) {
-		// unexpected TRIMMED packet
-		printk(KERN_ERR "Unexpected TRIMMED packet, seq=%d, state=%d, skb_len=%d\n",
-		       ntohl(th->seq), sk->sk_state, skb->len);
-		goto discard_it;
+	if (TCP_SKB_CB(skb)->trimmed && skb->len - th->doff * 4 == 0) { /* trimmed control packet (0 data len segment); valid cksum */
+		TCP_SKB_CB(skb)->send_nack = 0;
+		TCP_SKB_CB(skb)->process_normally = 1;
+	} else if(TCP_SKB_CB(skb)->trimmed && TCP_SKB_CB(skb)->cksum_valid) { /* data packet trimmed but valid cksum*/
+		TCP_SKB_CB(skb)->send_nack = 1;
+		TCP_SKB_CB(skb)->process_normally = 1;
+	} else if(TCP_SKB_CB(skb)->trimmed && !TCP_SKB_CB(skb)->cksum_valid) { /* data packet trimmed but invalid cksum*/
+		TCP_SKB_CB(skb)->send_nack = 1;
+		TCP_SKB_CB(skb)->process_normally = 0;
+	} else if (!TCP_SKB_CB(skb)->trimmed) { /* not trimmed, process normally */
+		TCP_SKB_CB(skb)->send_nack = 0;
+		TCP_SKB_CB(skb)->process_normally = 1;
 	}
+
+	// printk(KERN_INFO "Received packet! is trimmed=%d,csum_valid=%d,seq=%d,send_nack=%d,process_normally=%d,len=%d\n", TCP_SKB_CB(skb)->trimmed, TCP_SKB_CB(skb)->cksum_valid, ntohl(th->seq), TCP_SKB_CB(skb)->send_nack, TCP_SKB_CB(skb)->process_normally, skb->len);
 
 	if (sk->sk_state == TCP_TIME_WAIT)
 		goto do_time_wait;
