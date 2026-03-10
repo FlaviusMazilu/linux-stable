@@ -42,6 +42,7 @@
 #include <net/dst.h>
 #include <net/mptcp.h>
 #include <net/xfrm.h>
+#include <net/dscp.h>
 
 #include <linux/seq_file.h>
 #include <linux/memcontrol.h>
@@ -984,7 +985,11 @@ struct tcp_skb_cb {
 	__u8		txstamp_ack:1,	/* Record TX timestamp for ack? */
 			eor:1,		/* Is skb MSG_EOR marked? */
 			has_rxtstamp:1,	/* SKB has a RX timestamp	*/
-			unused:5;
+			trimmed:1,	/* skb has been trimmed		*/
+			cksum_valid:1,	/* checksum is valid		*/
+			process_normally:1, /* skb should be processed normally */
+			send_nack:1,	/* this is a trimmed packet that needs to signal back loss	*/
+			unused:1;
 	__u32		ack_seq;	/* Sequence number ACK'd	*/
 	union {
 		struct {
@@ -1055,6 +1060,10 @@ static inline int tcp_v4_sdif(struct sk_buff *skb)
 		return TCP_SKB_CB(skb)->header.h4.iif;
 #endif
 	return 0;
+}
+
+static inline bool tcp_v4_is_trimmed(const struct sk_buff *skb) {
+	return ip_hdr(skb)->tos >> 2 == DSCP_AF12;
 }
 
 /* Due to TSO, an SKB can be composed of multiple actual
