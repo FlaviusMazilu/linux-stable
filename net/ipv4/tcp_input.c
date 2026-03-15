@@ -6177,7 +6177,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	unsigned int len = skb->len;
 
 	// printk(KERN_DEBUG "tcp_rcv_established: INTRO\n" );
-	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) { // TRIMMED PACKET
+	if(false && ip_hdr(skb)->tos >> 2 == DSCP_AF12) { // skip this "TRIMMED" check, in the future this will be deleted
 		// send ack with NACK option
 		// set ICSK_ACK_NOW
 		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
