@@ -2254,6 +2254,25 @@ lookup:
 		TCP_SKB_CB(skb)->process_normally = 1;
 	}
 
+	bool mark_to_send_nack = false; // there is a jump to lookup in codeflow; we dont want to enter this section multiple times
+	if (!mark_to_send_nack && TCP_SKB_CB(skb)->send_nack) {
+		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
+		tcp_sk(sk)->trimming_send_nak = 1;
+		tcp_sk(sk)->nack_seq_to_send = ntohl(th->seq);
+
+		mark_to_send_nack = true;
+
+		if(!TCP_SKB_CB(skb)->process_normally) {
+			drop_reason = SKB_CONSUMED;
+			tcp_send_ack(sk);
+
+			goto discard_and_relse; // or discard_it
+		} else {
+			// process normally -> eventually an check_snd_ack will be called
+			// then, nack will be transmitted
+		}
+	}
+
 	// printk(KERN_INFO "Received packet! is trimmed=%d,csum_valid=%d,seq=%d,send_nack=%d,process_normally=%d,len=%d\n", TCP_SKB_CB(skb)->trimmed, TCP_SKB_CB(skb)->cksum_valid, ntohl(th->seq), TCP_SKB_CB(skb)->send_nack, TCP_SKB_CB(skb)->process_normally, skb->len);
 
 	if (sk->sk_state == TCP_TIME_WAIT)
