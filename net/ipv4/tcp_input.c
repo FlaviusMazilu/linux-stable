@@ -3044,7 +3044,6 @@ static void tcp_trimming_mark_lost(struct sock *sk)
         if (!before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq) &&
 		before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->end_seq)) {
 			mss = tcp_skb_mss(skb);
-			printk(KERN_DEBUG "NAK - nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
 
             if (tcp_skb_pcount(skb) <= 1 || skb->len <= mss) {
                 tcp_mark_skb_lost(sk, skb);
