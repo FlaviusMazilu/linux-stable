@@ -2186,6 +2186,7 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	const struct iphdr *iph;
 	const struct tcphdr *th;
 	struct sock *sk = NULL;
+	struct tcp_sock *tp;
 	bool refcounted;
 	int ret;
 	u32 isn;
@@ -2239,6 +2240,13 @@ lookup:
 			       th->dest, sdif, &refcounted);
 	if (!sk)
 		goto no_tcp_socket;
+
+	tp = tcp_sk(sk);
+	if(TCP_SKB_CB(skb)->trimmed && !tp->rx_opt.trimming_ok) {
+		printk(KERN_ERR "Received trimmed packet but socket did not negociate trimming! t_ok=%d, seq=%u,csum=%d\n", tp->rx_opt.trimming_ok, ntohl(th->seq), TCP_SKB_CB(skb)->cksum_valid);
+		drop_reason = SKB_DROP_REASON_NOT_SPECIFIED;
+		goto discard_it;
+	}
 
 	if (TCP_SKB_CB(skb)->trimmed && skb->len - th->doff * 4 == 0) { /* trimmed control packet (0 data len segment); valid cksum */
 		TCP_SKB_CB(skb)->send_nack = 0;
