@@ -3034,6 +3034,11 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una,
 	return false;
 }
 
+static inline bool tcp_is_trimming(struct sock *sk)
+{
+	return tcp_sk(sk)->rx_opt.trimming_ok;
+}
+
 
 static void tcp_trimming_mark_lost(struct sock *sk)
 {
@@ -3207,7 +3212,7 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 		fast_rexmit = 1;
 	}
 
-	if (!tcp_is_rack(sk) && do_lost)
+	if (!tcp_is_rack(sk) && !tcp_is_trimming(sk) && do_lost)
 		tcp_update_scoreboard(sk, fast_rexmit);
 	*rexmit = REXMIT_LOST;
 }
