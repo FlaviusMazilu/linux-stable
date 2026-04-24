@@ -6176,21 +6176,24 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int len = skb->len;
 
-	// printk(KERN_DEBUG "tcp_rcv_established: INTRO\n" );
-	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) { // TRIMMED PACKET
-		// send ack with NACK option
-		// set ICSK_ACK_NOW
-		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
-		// set option flag
-		tcp_sk(sk)->trimming_send_nak = 1;
-		tcp_sk(sk)->nack_seq_to_send = TCP_SKB_CB(skb)->seq;
-		// send NACK
-		__tcp_ack_snd_check(sk, 0);
-		// drop skb
+	if (ip_hdr(skb)->tos >> 2 == DSCP_AF12) { /* TRIMMED PACKET */
+		if (!tp->rx_opt.trimming_ok) {
+			pr_info_ratelimited("tcp_trimming: ignoring DSCP_AF12 packet on non-trimming connection (receiver trimming_ok=0)\n");
+			reason = SKB_DROP_REASON_NOT_SPECIFIED;
+			goto discard;
+		}
+		tp->trimming_send_nak = 1;
+		tp->nack_seq_to_send = TCP_SKB_CB(skb)->seq;
+		pr_info_ratelimited("tcp_trimming: received trimmed packet seq=%u trimming_ok=%u, sending NACK (receiver)\n",
+				    tp->nack_seq_to_send, tp->rx_opt.trimming_ok);
+		/* Drain synchronously: tcp_send_ack() emits the NACK option
+		 * using the nack_seq_to_send we just set. This closes the race
+		 * where another trimmed packet could overwrite the seq before
+		 * a deferred/coalesced ACK fires.
+		 */
+		tcp_send_ack(sk);
 		reason = SKB_CONSUMED;
 		goto discard;
-		// cal tcp_ack_snd_check
-		// printk(KERN_DEBUG "tcp_rcv_established: TRIMMED PACKET found, returning without sending ack\n" );
 	}
 
 	/* TCP congestion window tracking */
@@ -6624,6 +6627,9 @@ consume:
 		if (tp->rx_opt.trimming_ok) {
 			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
 		}
+		pr_info("tcp_trimming: client SYN_SENT->ESTABLISHED trimming_ok=%u sysctl=%u\n",
+			tp->rx_opt.trimming_ok,
+			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming));
 
 		if (tp->rx_opt.saw_tstamp) {
 			tp->rx_opt.tstamp_ok	   = 1;
@@ -6954,6 +6960,10 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		if (tp->rx_opt.trimming_ok) {
 			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
 		}
+		pr_info("tcp_trimming: server SYN_RECV->ESTABLISHED trimming_ok=%u sysctl=%u fastopen_rsk=%d\n",
+			tp->rx_opt.trimming_ok,
+			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming),
+			req ? 1 : 0);
 
 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
 

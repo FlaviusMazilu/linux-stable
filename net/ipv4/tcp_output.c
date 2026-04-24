@@ -976,8 +976,10 @@ static unsigned int tcp_synack_options(const struct sock *sk,
 			remaining -= TCPOLEN_SACKPERM_ALIGNED;
 	}
 	if (likely(ireq->trimming_ok)) {
-		opts->options |= OPTION_TRIMMING_ADVERTISE;
-		remaining -= TCPOLEN_TRIMMING_PERM_ALIGNED;
+		if (TCPOLEN_TRIMMING_PERM_ALIGNED <= remaining) {
+			opts->options |= OPTION_TRIMMING_ADVERTISE;
+			remaining -= TCPOLEN_TRIMMING_PERM_ALIGNED;
+		}
 	}
 
 	if (foc != NULL && foc->len >= 0) {
@@ -1016,9 +1018,15 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 
 	opts->options = 0;
 
-	if(unlikely(tp->trimming_send_nak)) {
+	if (unlikely(tp->trimming_send_nak && tp->rx_opt.trimming_ok)) {
 		opts->options |= OPTION_TRIMMING_NACK;
 		size += TCPOLEN_TRIMMING_NACK_ALIGNED;
+		pr_info_ratelimited("tcp_trimming: emitting NACK option seq=%u trimming_ok=%u (sender)\n",
+				    tp->nack_seq_to_send, tp->rx_opt.trimming_ok);
+		tp->trimming_send_nak = 0;
+	} else if (unlikely(tp->trimming_send_nak)) {
+		pr_info_ratelimited("tcp_trimming: dropping pending NACK seq=%u because trimming_ok=0 (sender)\n",
+				    tp->nack_seq_to_send);
 		tp->trimming_send_nak = 0;
 	}
 
