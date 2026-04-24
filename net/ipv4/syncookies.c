@@ -36,11 +36,12 @@ static siphash_aligned_key_t syncookie_secret[2];
 #define TS_OPT_WSCALE_MASK	0xf
 #define TS_OPT_SACK		BIT(4)
 #define TS_OPT_ECN		BIT(5)
+#define TS_OPT_TRIMMING		BIT(6)
 /* There is no TS_OPT_TIMESTAMP:
  * if ACK contains timestamp option, we already know it was
  * requested/supported by the syn/synack exchange.
  */
-#define TSBITS	6
+#define TSBITS	7
 
 static u32 cookie_hash(__be32 saddr, __be32 daddr, __be16 sport, __be16 dport,
 		       u32 count, int c)
@@ -69,6 +70,8 @@ u64 cookie_init_timestamp(struct request_sock *req, u64 now)
 		options |= TS_OPT_SACK;
 	if (ireq->ecn_ok)
 		options |= TS_OPT_ECN;
+	if (ireq->trimming_ok)
+		options |= TS_OPT_TRIMMING;
 
 	ts = (ts_now >> TSBITS) << TSBITS;
 	ts |= options;
@@ -251,6 +254,10 @@ bool cookie_timestamp_decode(const struct net *net,
 	if (tcp_opt->sack_ok && !READ_ONCE(net->ipv4.sysctl_tcp_sack))
 		return false;
 
+	tcp_opt->trimming_ok = !!(options & TS_OPT_TRIMMING);
+	if (tcp_opt->trimming_ok && !READ_ONCE(net->ipv4.sysctl_tcp_trimming))
+		tcp_opt->trimming_ok = 0;
+
 	if ((options & TS_OPT_WSCALE_MASK) == TS_OPT_WSCALE_MASK)
 		return true; /* no window scaling */
 
@@ -346,6 +353,7 @@ struct request_sock *cookie_tcp_reqsk_alloc(const struct request_sock_ops *ops,
 	ireq->sack_ok = tcp_opt->sack_ok;
 	ireq->wscale_ok = tcp_opt->wscale_ok;
 	ireq->ecn_ok = !!(tcp_opt->rcv_tsecr & TS_OPT_ECN);
+	ireq->trimming_ok = tcp_opt->trimming_ok;
 
 	treq->ts_off = tsoff;
 
