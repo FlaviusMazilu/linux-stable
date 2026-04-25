@@ -1018,14 +1018,14 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 
 	opts->options = 0;
 
-	if (unlikely(tp->trimming_send_nak && tp->rx_opt.trimming_ok)) {
+	if (unlikely(tp->trimming_send_nak)) {
+		/* Setters of trimming_send_nak (tcp_handle_trimmed) already
+		 * gate on rx_opt.trimming_ok via tcp_skb_should_handle_trimmed,
+		 * so a pending flag here implies trimming_ok == 1.
+		 */
 		opts->options |= OPTION_TRIMMING_NACK;
 		size += TCPOLEN_TRIMMING_NACK_ALIGNED;
-		pr_info_ratelimited("tcp_trimming: emitting NACK option seq=%u trimming_ok=%u (sender)\n",
-				    tp->nack_seq_to_send, tp->rx_opt.trimming_ok);
-		tp->trimming_send_nak = 0;
-	} else if (unlikely(tp->trimming_send_nak)) {
-		pr_info_ratelimited("tcp_trimming: dropping pending NACK seq=%u because trimming_ok=0 (sender)\n",
+		pr_info_ratelimited("tcp_trimming: emitting NACK option seq=%u (sender)\n",
 				    tp->nack_seq_to_send);
 		tp->trimming_send_nak = 0;
 	}
@@ -4327,6 +4327,23 @@ EXPORT_SYMBOL_GPL(__tcp_send_ack);
 void tcp_send_ack(struct sock *sk)
 {
 	__tcp_send_ack(sk, tcp_sk(sk)->rcv_nxt);
+}
+
+/* Emit a single ACK marked DSCP_CONTROL (CS6) carrying the pending
+ * TRIMMING_NACK option. The DSCP is flipped on the socket only for the
+ * duration of this call so the network treats the NACK as control-plane
+ * traffic that bypasses the data queue's drop/trim policy. Caller must
+ * hold the socket lock; tp->trimming_send_nak and tp->nack_seq_to_send
+ * must be set before calling.
+ */
+void tcp_send_nack_ack(struct sock *sk)
+{
+	struct inet_sock *inet = inet_sk(sk);
+	u8 saved_tos = READ_ONCE(inet->tos);
+
+	WRITE_ONCE(inet->tos, (saved_tos & INET_ECN_MASK) | (DSCP_CONTROL << 2));
+	tcp_send_ack(sk);
+	WRITE_ONCE(inet->tos, saved_tos);
 }
 
 /* This routine sends a packet with an out of date sequence
