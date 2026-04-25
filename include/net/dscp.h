@@ -71,6 +71,13 @@
  */
 #define DSCP_LE 1		/* 000001, [RFC8622] */
 
+/* TCP packet trimming: control-plane DSCP for NACK ACKs.
+ * Aliased to CS6 so routers route NACKs through the network-control queue
+ * (already commonly preserved end-to-end) instead of the data queue that
+ * can trim/drop them under congestion.
+ */
+#define DSCP_CONTROL DSCP_CS6
+
 #define DSCP_MAX 64
 
 #endif /* __DSCP_H__ */

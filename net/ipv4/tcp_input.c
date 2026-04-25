@@ -2788,7 +2788,7 @@ static void tcp_try_to_open(struct sock *sk, int flag)
 	if (!tcp_any_retrans_done(sk))
 		tp->retrans_stamp = 0;
 
-	if (flag & FLAG_ECE)
+	if (flag & (FLAG_ECE | FLAG_NACK))
 		tcp_enter_cwr(sk);
 
 	if (inet_csk(sk)->icsk_ca_state != TCP_CA_CWR) {
@@ -3035,26 +3035,59 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una,
 }
 
 
+/* React to a trimmed packet on a connection that already negotiated
+ * trimming: queue a NACK for the segment's seq and drain it via a
+ * dedicated CS6 ACK. Caller must hold socket lock and have ensured
+ * tp->rx_opt.trimming_ok (see tcp_skb_should_handle_trimmed).
+ */
+static void tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	tp->trimming_send_nak = 1;
+	tp->nack_seq_to_send  = TCP_SKB_CB(skb)->seq;
+	pr_info_ratelimited("tcp_trimming: received trimmed packet seq=%u state=%u trimming_ok=%u, sending NACK (receiver)\n",
+			    tp->nack_seq_to_send, sk->sk_state,
+			    tp->rx_opt.trimming_ok);
+	tcp_send_nack_ack(sk);
+}
+
+/* True when @skb is a trimmed packet that the socket should react to
+ * (i.e. trimming was negotiated end-to-end). Trimmed packets on
+ * non-trimming connections are dropped silently by the caller.
+ */
+static inline bool tcp_skb_should_handle_trimmed(const struct sock *sk,
+					  const struct sk_buff *skb)
+{
+	return TCP_SKB_CB(skb)->trimmed && tcp_sk(sk)->rx_opt.trimming_ok;
+}
+
+/* Locate the segment named by the NACK in the rtx queue and mark it
+ * lost so the standard recovery machinery picks it up (lost_out++ ->
+ * tcp_time_to_recover() -> tcp_enter_recovery()).
+ *
+ * If the named segment is no longer in the rtx queue (already ACKed —
+ * the "trimmer marked but payload survived" case — or the queue is
+ * empty), this no-ops. tcp_time_to_recover() will then return false
+ * and tcp_fastretrans_alert() falls through to tcp_try_to_open(),
+ * which converts the NACK into a CWR transition (mirroring how ECE
+ * is handled).
+ */
 static void tcp_trimming_mark_lost(struct sock *sk)
 {
 	struct sk_buff *skb = tcp_rtx_queue_head(sk);
+	u32 nack_seq = tcp_sk(sk)->rx_opt.nack_seq;
 
-	if (!skb) {
- 		// printk(KERN_DEBUG "NAK: rtx queue is empty");
- 		WARN_ON(!skb);
- 		return;
- 	}
+	if (!skb)
+		return;
 
 	skb_rbtree_walk_from(skb) {
-		// printk(KERN_DEBUG "NAK:nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
- 		if (!before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq) &&
- 			before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->end_seq)) {
- 				tcp_mark_skb_lost(sk, skb);
- 				// printk(KERN_DEBUG "NAK: mark packet as lost");
- 				return;
- 			}
- 	}
- 	// printk(KERN_DEBUG "NAK: found no lost packet to mark");
+		if (!before(nack_seq, TCP_SKB_CB(skb)->seq) &&
+		    before(nack_seq, TCP_SKB_CB(skb)->end_seq)) {
+			tcp_mark_skb_lost(sk, skb);
+			return;
+		}
+	}
 }
 
 static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
@@ -6176,24 +6209,17 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int len = skb->len;
 
-	if (ip_hdr(skb)->tos >> 2 == DSCP_AF12) { /* TRIMMED PACKET */
+	if (TCP_SKB_CB(skb)->trimmed) {
 		if (!tp->rx_opt.trimming_ok) {
-			pr_info_ratelimited("tcp_trimming: ignoring DSCP_AF12 packet on non-trimming connection (receiver trimming_ok=0)\n");
+			pr_info_ratelimited("tcp_trimming: ignoring trimmed skb on non-trimming connection (receiver trimming_ok=0)\n");
 			reason = SKB_DROP_REASON_NOT_SPECIFIED;
 			goto discard;
 		}
-		tp->trimming_send_nak = 1;
-		tp->nack_seq_to_send = TCP_SKB_CB(skb)->seq;
-		pr_info_ratelimited("tcp_trimming: received trimmed packet seq=%u trimming_ok=%u, sending NACK (receiver)\n",
-				    tp->nack_seq_to_send, tp->rx_opt.trimming_ok);
-		/* Drain synchronously: tcp_send_ack() emits the NACK option
-		 * using the nack_seq_to_send we just set. This closes the race
-		 * where another trimmed packet could overwrite the seq before
-		 * a deferred/coalesced ACK fires.
-		 */
-		tcp_send_ack(sk);
-		reason = SKB_CONSUMED;
-		goto discard;
+		tcp_handle_trimmed(sk, skb);
+		if (!TCP_SKB_CB(skb)->trim_payload_ok) {
+			reason = SKB_CONSUMED;
+			goto discard;
+		}
 	}
 
 	/* TCP congestion window tracking */
@@ -6980,6 +7006,26 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		tcp_fast_path_on(tp);
 		if (sk->sk_shutdown & SEND_SHUTDOWN)
 			tcp_shutdown(sk, SEND_SHUTDOWN);
+
+		/* Reordered case: the packet that completed the 3WHS was
+		 * DSCP-marked AF12 in flight. The connection is now
+		 * ESTABLISHED. Emit a NACK now so the sender can react at
+		 * fast-recovery speed instead of waiting for RTO. Whether
+		 * the payload is delivered depends on whether the trimmer
+		 * actually shaved bytes (trim_payload_ok).
+		 */
+		if (tcp_skb_should_handle_trimmed(sk, skb)) {
+			tcp_handle_trimmed(sk, skb);
+			if (!TCP_SKB_CB(skb)->trim_payload_ok) {
+				/* Real trim, payload untrustworthy — drop. */
+				SKB_DR_SET(reason, NOT_SPECIFIED);
+				goto discard;
+			}
+			/* trim_payload_ok: fall through to step 6/7 so the
+			 * (intact) payload is delivered and rcv_nxt advances.
+			 * The NACK is a pure congestion signal in this case.
+			 */
+		}
 		break;
 
 	case TCP_FIN_WAIT1: {
