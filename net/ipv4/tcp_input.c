@@ -3062,9 +3062,17 @@ static inline bool tcp_skb_should_handle_trimmed(const struct sock *sk,
 	return TCP_SKB_CB(skb)->trimmed && tcp_sk(sk)->rx_opt.trimming_ok;
 }
 
-/* Locate the segment named by the NACK in the rtx queue and mark it
- * lost so the standard recovery machinery picks it up (lost_out++ ->
- * tcp_time_to_recover() -> tcp_enter_recovery()).
+/* Locate the segment named by the NACK in the rtx queue and mark
+ * exactly one wire-MSS lost, so the recovery machinery retransmits
+ * only what the receiver said was missing — not the whole TSO
+ * superpacket that contained it.
+ *
+ * If the rtx skb covering nack_seq is a TSO superpacket we split
+ * twice:
+ *   1. peel off the bytes BEFORE the target MSS (head),
+ *   2. peel off the target MSS itself out of the remainder.
+ * Both splits land on MSS boundaries to preserve gso bookkeeping
+ * (gso_size = mss, gso_segs = ceil(len/mss)).
  *
  * If the named segment is no longer in the rtx queue (already ACKed —
  * the "trimmer marked but payload survived" case — or the queue is
@@ -3082,11 +3090,57 @@ static void tcp_trimming_mark_lost(struct sock *sk)
 		return;
 
 	skb_rbtree_walk_from(skb) {
-		if (!before(nack_seq, TCP_SKB_CB(skb)->seq) &&
-		    before(nack_seq, TCP_SKB_CB(skb)->end_seq)) {
+		struct sk_buff *target;
+		u32 mss, len_before;
+
+		if (before(nack_seq, TCP_SKB_CB(skb)->seq) ||
+		    !before(nack_seq, TCP_SKB_CB(skb)->end_seq))
+			continue;
+
+		/* Single wire segment already: mark the whole skb. */
+		if (tcp_skb_pcount(skb) <= 1) {
 			tcp_mark_skb_lost(sk, skb);
 			return;
 		}
+
+		mss = tcp_skb_mss(skb);
+
+		/* Round nack_seq's offset within skb DOWN to the nearest
+		 * MSS boundary. In normal traffic nack_seq is already
+		 * MSS-aligned (it's the seq of a wire segment whose start
+		 * lies at skb->seq + k*mss). The round-down is defensive
+		 * against unaligned NACKs and keeps splits on MSS
+		 * boundaries so TSO accounting stays clean.
+		 */
+		len_before = (nack_seq - TCP_SKB_CB(skb)->seq) / mss * mss;
+
+		if (len_before > 0) {
+			/* Peel off the prefix before the target MSS. */
+			if (tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, skb,
+					 len_before, mss, GFP_ATOMIC) < 0)
+				return;
+			target = skb_rb_next(skb);
+			if (!target)
+				return;
+		} else {
+			/* nack_seq sits at skb->seq -- skb itself is the
+			 * candidate, just possibly oversized.
+			 */
+			target = skb;
+		}
+
+		/* If target still spans multiple MSSes, peel off the first
+		 * one so tcp_mark_skb_lost increments lost_out by exactly 1.
+		 * Ignore the return value: on -ENOMEM target stays > 1 MSS
+		 * and marking it lost causes the sender to retransmit a bit
+		 * more than necessary, which is fine -- state stays consistent.
+		 */
+		if (target->len > mss)
+			tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, target,
+				     mss, mss, GFP_ATOMIC);
+
+		tcp_mark_skb_lost(sk, target);
+		return;
 	}
 }
 
