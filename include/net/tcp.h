@@ -1062,7 +1062,7 @@ static inline int tcp_v4_sdif(struct sk_buff *skb)
 }
 
 static inline bool tcp_v4_is_trimmed(const struct sk_buff *skb) {
-	return ip_hdr(skb)->tos >> 2 == DSCP_AF12;
+	return ip_hdr(skb)->tos >> 2 == DSCP_TRIMMED;
 }
 
 /* Due to TSO, an SKB can be composed of multiple actual
