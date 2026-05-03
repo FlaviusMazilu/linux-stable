@@ -77,7 +77,8 @@
  * can trim/drop them under congestion.
  */
 #define DSCP_CONTROL DSCP_CS6
-
+#define DSCP_TRIMMABLE DSCP_AF41
+#define DSCP_TRIMMED DSCP_AF12
 #define DSCP_MAX 64
 
 #endif /* __DSCP_H__ */

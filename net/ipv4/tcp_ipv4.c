@@ -2215,7 +2215,7 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	 * So, we defer the checks. */
 
 	if (tcp_v4_is_trimmed(skb)) {
-		/* DSCP=AF12 marks a packet whose payload may have been shaved
+		/* DSCP=DSCP_TRIMMED marks a packet whose payload may have been shaved
 		 * en route. The trimmer cannot recompute the TCP checksum in
 		 * hardware, so we have to decide locally whether the cksum
 		 * mismatch is real (= trim happened) or absent (= the packet

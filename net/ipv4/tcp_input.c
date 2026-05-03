@@ -6705,7 +6705,7 @@ consume:
 		}
 
 		if (tp->rx_opt.trimming_ok) {
-			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
+			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
 		pr_info("tcp_trimming: client SYN_SENT->ESTABLISHED trimming_ok=%u sysctl=%u\n",
 			tp->rx_opt.trimming_ok,
@@ -7038,7 +7038,7 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		tp->snd_una = TCP_SKB_CB(skb)->ack_seq;
 		tp->snd_wnd = ntohs(th->window) << tp->rx_opt.snd_wscale;
 		if (tp->rx_opt.trimming_ok) {
-			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
+			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
 		pr_info("tcp_trimming: server SYN_RECV->ESTABLISHED trimming_ok=%u sysctl=%u fastopen_rsk=%d\n",
 			tp->rx_opt.trimming_ok,
