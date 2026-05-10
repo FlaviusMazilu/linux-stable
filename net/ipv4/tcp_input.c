@@ -2714,11 +2714,13 @@ void tcp_cwnd_reduction(struct sock *sk, int newly_acked_sacked, int newly_lost,
 	struct tcp_sock *tp = tcp_sk(sk);
 	int sndcnt = 0;
 	int delta = tp->snd_ssthresh - tcp_packets_in_flight(tp);
+	int nack_credit = (flag & FLAG_NACK) ? 1 : 0;
 
-	if (newly_acked_sacked <= 0 || WARN_ON_ONCE(!tp->prior_cwnd))
+	if (newly_acked_sacked + nack_credit <= 0 ||
+	    WARN_ON_ONCE(!tp->prior_cwnd))
 		return;
 
-	tp->prr_delivered += newly_acked_sacked;
+	tp->prr_delivered += newly_acked_sacked + nack_credit;
 	if (delta < 0) {
 		u64 dividend = (u64)tp->snd_ssthresh * tp->prr_delivered +
 			       tp->prior_cwnd - 1;
@@ -2788,7 +2790,7 @@ static void tcp_try_to_open(struct sock *sk, int flag)
 	if (!tcp_any_retrans_done(sk))
 		tp->retrans_stamp = 0;
 
-	if (flag & (FLAG_ECE | FLAG_NACK))
+	if (flag & FLAG_ECE)
 		tcp_enter_cwr(sk);
 
 	if (inet_csk(sk)->icsk_ca_state != TCP_CA_CWR) {
@@ -6705,7 +6707,7 @@ consume:
 		}
 
 		if (tp->rx_opt.trimming_ok) {
-			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
+			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
 		pr_info("tcp_trimming: client SYN_SENT->ESTABLISHED trimming_ok=%u sysctl=%u\n",
 			tp->rx_opt.trimming_ok,
@@ -7038,7 +7040,7 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		tp->snd_una = TCP_SKB_CB(skb)->ack_seq;
 		tp->snd_wnd = ntohs(th->window) << tp->rx_opt.snd_wscale;
 		if (tp->rx_opt.trimming_ok) {
-			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
+			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
 		pr_info("tcp_trimming: server SYN_RECV->ESTABLISHED trimming_ok=%u sysctl=%u fastopen_rsk=%d\n",
 			tp->rx_opt.trimming_ok,

@@ -76,7 +76,9 @@
  * (already commonly preserved end-to-end) instead of the data queue that
  * can trim/drop them under congestion.
  */
-#define DSCP_CONTROL DSCP_CS6
+#define DSCP_TRIMMABLE	DSCP_AF41
+#define DSCP_TRIMMED	DSCP_AF12
+#define DSCP_CONTROL	DSCP_CS6
 
 #define DSCP_MAX 64
 
