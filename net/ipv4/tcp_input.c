@@ -2788,7 +2788,7 @@ static void tcp_try_to_open(struct sock *sk, int flag)
 	if (!tcp_any_retrans_done(sk))
 		tp->retrans_stamp = 0;
 
-	if (flag & (FLAG_ECE | FLAG_NACK))
+	if (flag & FLAG_ECE)
 		tcp_enter_cwr(sk);
 
 	if (inet_csk(sk)->icsk_ca_state != TCP_CA_CWR) {
