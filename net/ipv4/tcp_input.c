@@ -3035,26 +3035,113 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una,
 }
 
 
+/* React to a trimmed packet on a connection that already negotiated
+ * trimming: queue a NACK for the segment's seq and drain it via a
+ * dedicated CS6 ACK. Caller must hold socket lock and have ensured
+ * tp->rx_opt.trimming_ok (see tcp_skb_should_handle_trimmed).
+ */
+static void tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	tp->trimming_send_nak = 1;
+	tp->nack_seq_to_send  = TCP_SKB_CB(skb)->seq;
+	pr_info_ratelimited("tcp_trimming: received trimmed packet seq=%u state=%u trimming_ok=%u, sending NACK (receiver)\n",
+			    tp->nack_seq_to_send, sk->sk_state,
+			    tp->rx_opt.trimming_ok);
+	tcp_send_nack_ack(sk);
+}
+
+/* True when @skb is a trimmed packet that the socket should react to
+ * (i.e. trimming was negotiated end-to-end). Trimmed packets on
+ * non-trimming connections are dropped silently by the caller.
+ */
+static inline bool tcp_skb_should_handle_trimmed(const struct sock *sk,
+					  const struct sk_buff *skb)
+{
+	return TCP_SKB_CB(skb)->trimmed && tcp_sk(sk)->rx_opt.trimming_ok;
+}
+
+/* Locate the segment named by the NACK in the rtx queue and mark
+ * exactly one wire-MSS lost, so the recovery machinery retransmits
+ * only what the receiver said was missing — not the whole TSO
+ * superpacket that contained it.
+ *
+ * If the rtx skb covering nack_seq is a TSO superpacket we split
+ * twice:
+ *   1. peel off the bytes BEFORE the target MSS (head),
+ *   2. peel off the target MSS itself out of the remainder.
+ * Both splits land on MSS boundaries to preserve gso bookkeeping
+ * (gso_size = mss, gso_segs = ceil(len/mss)).
+ *
+ * If the named segment is no longer in the rtx queue (already ACKed —
+ * the "trimmer marked but payload survived" case — or the queue is
+ * empty), this no-ops. tcp_time_to_recover() will then return false
+ * and tcp_fastretrans_alert() falls through to tcp_try_to_open(),
+ * which converts the NACK into a CWR transition (mirroring how ECE
+ * is handled).
+ */
 static void tcp_trimming_mark_lost(struct sock *sk)
 {
 	struct sk_buff *skb = tcp_rtx_queue_head(sk);
+	u32 nack_seq = tcp_sk(sk)->rx_opt.nack_seq;
 
-	if (!skb) {
- 		// printk(KERN_DEBUG "NAK: rtx queue is empty");
- 		WARN_ON(!skb);
- 		return;
- 	}
+	if (!skb)
+		return;
 
 	skb_rbtree_walk_from(skb) {
-		// printk(KERN_DEBUG "NAK:nack seq %u skb seq %u end_seq %u", tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq);
- 		if (!before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->seq) &&
- 			before(tcp_sk(sk)->rx_opt.nack_seq, TCP_SKB_CB(skb)->end_seq)) {
- 				tcp_mark_skb_lost(sk, skb);
- 				// printk(KERN_DEBUG "NAK: mark packet as lost");
- 				return;
- 			}
- 	}
- 	// printk(KERN_DEBUG "NAK: found no lost packet to mark");
+		struct sk_buff *target;
+		u32 mss, len_before;
+
+		if (before(nack_seq, TCP_SKB_CB(skb)->seq) ||
+		    !before(nack_seq, TCP_SKB_CB(skb)->end_seq))
+			continue;
+
+		/* Single wire segment already: mark the whole skb. */
+		if (tcp_skb_pcount(skb) <= 1) {
+			tcp_mark_skb_lost(sk, skb);
+			return;
+		}
+
+		mss = tcp_skb_mss(skb);
+
+		/* Round nack_seq's offset within skb DOWN to the nearest
+		 * MSS boundary. In normal traffic nack_seq is already
+		 * MSS-aligned (it's the seq of a wire segment whose start
+		 * lies at skb->seq + k*mss). The round-down is defensive
+		 * against unaligned NACKs and keeps splits on MSS
+		 * boundaries so TSO accounting stays clean.
+		 */
+		len_before = (nack_seq - TCP_SKB_CB(skb)->seq) / mss * mss;
+
+		if (len_before > 0) {
+			/* Peel off the prefix before the target MSS. */
+			if (tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, skb,
+					 len_before, mss, GFP_ATOMIC) < 0)
+				return;
+			target = skb_rb_next(skb);
+			if (!target)
+				return;
+		} else {
+			/* nack_seq sits at skb->seq -- skb itself is the
+			 * candidate, just possibly oversized.
+			 */
+			target = skb;
+		}
+
+		/* If target still spans multiple MSSes, peel off the first
+		 * one so tcp_mark_skb_lost increments lost_out by exactly 1.
+		 * Ignore the return value: on -ENOMEM target stays > 1 MSS
+		 * and marking it lost causes the sender to retransmit a bit
+		 * more than necessary, which is fine -- state stays consistent.
+		 */
+		if (target->len > mss)
+			tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, target,
+				     mss, mss, GFP_ATOMIC);
+
+		tcp_mark_skb_lost(sk, target);
+		return;
+	}
 }
 
 static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
@@ -6176,21 +6263,17 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int len = skb->len;
 
-	// printk(KERN_DEBUG "tcp_rcv_established: INTRO\n" );
-	if(ip_hdr(skb)->tos >> 2 == DSCP_AF12) { // TRIMMED PACKET
-		// send ack with NACK option
-		// set ICSK_ACK_NOW
-		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW;
-		// set option flag
-		tcp_sk(sk)->trimming_send_nak = 1;
-		tcp_sk(sk)->nack_seq_to_send = TCP_SKB_CB(skb)->seq;
-		// send NACK
-		__tcp_ack_snd_check(sk, 0);
-		// drop skb
-		reason = SKB_CONSUMED;
-		goto discard;
-		// cal tcp_ack_snd_check
-		// printk(KERN_DEBUG "tcp_rcv_established: TRIMMED PACKET found, returning without sending ack\n" );
+	if (TCP_SKB_CB(skb)->trimmed) {
+		if (!tp->rx_opt.trimming_ok) {
+			pr_info_ratelimited("tcp_trimming: ignoring trimmed skb on non-trimming connection (receiver trimming_ok=0)\n");
+			reason = SKB_DROP_REASON_NOT_SPECIFIED;
+			goto discard;
+		}
+		tcp_handle_trimmed(sk, skb);
+		if (!TCP_SKB_CB(skb)->trim_payload_ok) {
+			reason = SKB_CONSUMED;
+			goto discard;
+		}
 	}
 
 	/* TCP congestion window tracking */
@@ -6622,8 +6705,11 @@ consume:
 		}
 
 		if (tp->rx_opt.trimming_ok) {
-			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
+			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
+		pr_info("tcp_trimming: client SYN_SENT->ESTABLISHED trimming_ok=%u sysctl=%u\n",
+			tp->rx_opt.trimming_ok,
+			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming));
 
 		if (tp->rx_opt.saw_tstamp) {
 			tp->rx_opt.tstamp_ok	   = 1;
@@ -6952,8 +7038,12 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		tp->snd_una = TCP_SKB_CB(skb)->ack_seq;
 		tp->snd_wnd = ntohs(th->window) << tp->rx_opt.snd_wscale;
 		if (tp->rx_opt.trimming_ok) {
-			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_AF41 << 2);
+			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
+		pr_info("tcp_trimming: server SYN_RECV->ESTABLISHED trimming_ok=%u sysctl=%u fastopen_rsk=%d\n",
+			tp->rx_opt.trimming_ok,
+			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming),
+			req ? 1 : 0);
 
 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
 
@@ -6970,6 +7060,26 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		tcp_fast_path_on(tp);
 		if (sk->sk_shutdown & SEND_SHUTDOWN)
 			tcp_shutdown(sk, SEND_SHUTDOWN);
+
+		/* Reordered case: the packet that completed the 3WHS was
+		 * DSCP-marked AF12 in flight. The connection is now
+		 * ESTABLISHED. Emit a NACK now so the sender can react at
+		 * fast-recovery speed instead of waiting for RTO. Whether
+		 * the payload is delivered depends on whether the trimmer
+		 * actually shaved bytes (trim_payload_ok).
+		 */
+		if (tcp_skb_should_handle_trimmed(sk, skb)) {
+			tcp_handle_trimmed(sk, skb);
+			if (!TCP_SKB_CB(skb)->trim_payload_ok) {
+				/* Real trim, payload untrustworthy — drop. */
+				SKB_DR_SET(reason, NOT_SPECIFIED);
+				goto discard;
+			}
+			/* trim_payload_ok: fall through to step 6/7 so the
+			 * (intact) payload is delivered and rcv_nxt advances.
+			 * The NACK is a pure congestion signal in this case.
+			 */
+		}
 		break;
 
 	case TCP_FIN_WAIT1: {

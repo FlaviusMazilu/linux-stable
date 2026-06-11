@@ -676,6 +676,7 @@ int tcp_send_synack(struct sock *);
 void tcp_push_one(struct sock *, unsigned int mss_now);
 void __tcp_send_ack(struct sock *sk, u32 rcv_nxt);
 void tcp_send_ack(struct sock *sk);
+void tcp_send_nack_ack(struct sock *sk);
 void tcp_send_delayed_ack(struct sock *sk);
 void tcp_send_loss_probe(struct sock *sk);
 bool tcp_schedule_loss_probe(struct sock *sk, bool advancing_rto);
@@ -985,11 +986,9 @@ struct tcp_skb_cb {
 	__u8		txstamp_ack:1,	/* Record TX timestamp for ack? */
 			eor:1,		/* Is skb MSG_EOR marked? */
 			has_rxtstamp:1,	/* SKB has a RX timestamp	*/
-			trimmed:1,	/* skb has been trimmed		*/
-			cksum_valid:1,	/* checksum is valid		*/
-			process_normally:1, /* skb should be processed normally */
-			send_nack:1,	/* this is a trimmed packet that needs to signal back loss	*/
-			unused:1;
+			trimmed:1,	/* trimmed (DSCP=AF12); cksum bypassed */
+			trim_payload_ok:1, /* trimmed packet whose TCP cksum still validate */
+			unused:3;
 	__u32		ack_seq;	/* Sequence number ACK'd	*/
 	union {
 		struct {
@@ -1063,7 +1062,7 @@ static inline int tcp_v4_sdif(struct sk_buff *skb)
 }
 
 static inline bool tcp_v4_is_trimmed(const struct sk_buff *skb) {
-	return ip_hdr(skb)->tos >> 2 == DSCP_AF12;
+	return ip_hdr(skb)->tos >> 2 == DSCP_TRIMMED;
 }
 
 /* Due to TSO, an SKB can be composed of multiple actual
