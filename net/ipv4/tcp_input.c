@@ -3040,7 +3040,7 @@ static bool tcp_try_undo_partial(struct sock *sk, u32 prior_snd_una,
  * dedicated CS6 ACK. Caller must hold socket lock and have ensured
  * tp->rx_opt.trimming_ok (see tcp_skb_should_handle_trimmed).
  */
-static void tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb)
+static void __tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb, bool send_nack_now)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
@@ -3049,7 +3049,43 @@ static void tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb)
 	pr_info_ratelimited("tcp_trimming: received trimmed packet seq=%u state=%u trimming_ok=%u, sending NACK (receiver)\n",
 			    tp->nack_seq_to_send, sk->sk_state,
 			    tp->rx_opt.trimming_ok);
-	tcp_send_nack_ack(sk);
+	if (send_nack_now)
+		tcp_send_nack_ack(sk);
+	else
+		inet_csk(sk)->icsk_ack.pending |= ICSK_ACK_NOW; // make sure delayed ACK is bypassed
+}
+
+/* Preprocess @skb if it's trimmed. If the skb is a trimmed packet that the socket should react to,
+ * handle it and return false to drop the skb. Otherwise return true to continue normal processing.
+*/
+static bool tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb, enum skb_drop_reason *reason)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct tcphdr *th = tcp_hdr(skb);
+
+	bool discard = false;
+	printk(KERN_DEBUG "tcp_trimming: preprocessing skb seq=%u len=%u th->doff=%u trimming_ok=%u\n",
+	       TCP_SKB_CB(skb)->seq, skb->len, th->doff, tp->rx_opt.trimming_ok);
+
+	if (!tp->rx_opt.trimming_ok) {
+		pr_info_ratelimited("tcp_trimming: ignoring trimmed skb on non-trimming connection (receiver trimming_ok=0)\n");
+		*reason = SKB_DROP_REASON_NOT_SPECIFIED;
+		discard = true;
+	}
+	if (!TCP_SKB_CB(skb)->trim_payload_ok) { // trimmed payload
+		__tcp_handle_trimmed(sk, skb, /*send_nack_now=*/true);
+		*reason = SKB_CONSUMED;
+		discard = true;
+	} else if (skb->len - th->doff * 4 != 0){ // trimmed, non-zero, healthy payload
+		// process normally, just mark the need to send NACK NOW
+		__tcp_handle_trimmed(sk, skb, /*send_nack_now=*/false);
+
+	} // else, for trimmed pure ACK, just process normally without sending NACK
+
+	printk(KERN_INFO "tcp_trimming: finished preprocessing skb seq=%u len=%u, discard=%d\n",
+	      TCP_SKB_CB(skb)->seq, skb->len, discard);
+
+	return !discard;
 }
 
 /* True when @skb is a trimmed packet that the socket should react to
@@ -6263,17 +6299,9 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 	struct tcp_sock *tp = tcp_sk(sk);
 	unsigned int len = skb->len;
 
-	if (TCP_SKB_CB(skb)->trimmed) {
-		if (!tp->rx_opt.trimming_ok) {
-			pr_info_ratelimited("tcp_trimming: ignoring trimmed skb on non-trimming connection (receiver trimming_ok=0)\n");
-			reason = SKB_DROP_REASON_NOT_SPECIFIED;
+	if (tcp_skb_should_handle_trimmed(sk, skb) &&
+		!tcp_handle_trimmed(sk, skb, &reason)) {
 			goto discard;
-		}
-		tcp_handle_trimmed(sk, skb);
-		if (!TCP_SKB_CB(skb)->trim_payload_ok) {
-			reason = SKB_CONSUMED;
-			goto discard;
-		}
 	}
 
 	/* TCP congestion window tracking */
@@ -6920,10 +6948,17 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 
 	switch (sk->sk_state) {
 	case TCP_CLOSE:
+		if (tcp_skb_should_handle_trimmed(sk, skb))
+			printk(KERN_ERR "unhandled TRIMMED packet in TCP_CLOSE state: seq=%u len=%u sport=%u dport=%u\n",
+			       TCP_SKB_CB(skb)->seq, skb->len, ntohs(th->source), ntohs(th->dest));
 		SKB_DR_SET(reason, TCP_CLOSE);
 		goto discard;
 
 	case TCP_LISTEN:
+		// we might receive TRIMMED packets here? if yes, maybe fastopen is used?
+		if (tcp_skb_should_handle_trimmed(sk, skb))
+			printk(KERN_ERR "unhandled TRIMMED packet in TCP_LISTEN state: seq=%u len=%u sport=%u dport=%u\n",
+			       TCP_SKB_CB(skb)->seq, skb->len, ntohs(th->source), ntohs(th->dest));
 		if (th->ack)
 			return SKB_DROP_REASON_TCP_FLAGS;
 
@@ -6952,6 +6987,12 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		goto discard;
 
 	case TCP_SYN_SENT:
+		// security issue, trimmed SYN ACK packet received
+		if(tcp_v4_is_trimmed(skb)) {
+			printk(KERN_ERR "unexpected TRIMMED packet in TCP_SYN_SENT state: seq=%u len=%u sport=%u dport=%u; Dropping...\n",
+			       TCP_SKB_CB(skb)->seq, skb->len, ntohs(th->source), ntohs(th->dest));
+			goto discard;
+		}
 		tp->rx_opt.saw_tstamp = 0;
 		tcp_mstamp_refresh(tp);
 		queued = tcp_rcv_synsent_state_process(sk, skb, th);
@@ -6963,6 +7004,14 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		__kfree_skb(skb);
 		tcp_data_snd_check(sk);
 		return 0;
+	}
+
+	// verify handling of trimmed packet before processing the header (in tcp_validate_incoming and tcp_ack)
+	// which might be corrupt; also, send nacks if needed independent to the state (maybe security issue? we should
+	// send NACKs only from well known states)
+	if (tcp_skb_should_handle_trimmed(sk, skb) &&
+		!tcp_handle_trimmed(sk, skb, &reason)) {
+			goto discard;
 	}
 
 	tcp_mstamp_refresh(tp);
@@ -7061,25 +7110,6 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		if (sk->sk_shutdown & SEND_SHUTDOWN)
 			tcp_shutdown(sk, SEND_SHUTDOWN);
 
-		/* Reordered case: the packet that completed the 3WHS was
-		 * DSCP-marked AF12 in flight. The connection is now
-		 * ESTABLISHED. Emit a NACK now so the sender can react at
-		 * fast-recovery speed instead of waiting for RTO. Whether
-		 * the payload is delivered depends on whether the trimmer
-		 * actually shaved bytes (trim_payload_ok).
-		 */
-		if (tcp_skb_should_handle_trimmed(sk, skb)) {
-			tcp_handle_trimmed(sk, skb);
-			if (!TCP_SKB_CB(skb)->trim_payload_ok) {
-				/* Real trim, payload untrustworthy — drop. */
-				SKB_DR_SET(reason, NOT_SPECIFIED);
-				goto discard;
-			}
-			/* trim_payload_ok: fall through to step 6/7 so the
-			 * (intact) payload is delivered and rcv_nxt advances.
-			 * The NACK is a pure congestion signal in this case.
-			 */
-		}
 		break;
 
 	case TCP_FIN_WAIT1: {
