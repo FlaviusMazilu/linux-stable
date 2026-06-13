@@ -3062,6 +3062,30 @@ static inline bool tcp_skb_should_handle_trimmed(const struct sock *sk,
 	return TCP_SKB_CB(skb)->trimmed && tcp_sk(sk)->rx_opt.trimming_ok;
 }
 
+/* Return true if a trimming NACK gives enough evidence to mark @skb lost.
+ *
+ * A duplicate NACK can arrive while the retransmission triggered by an earlier
+ * NACK is still in flight. In that case, avoid treating the retransmission as
+ * lost until at least one min RTT has elapsed since it was sent.
+ */
+static bool tcp_trimming_should_mark_lost(struct sock *sk, const struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	u8 sacked = TCP_SKB_CB(skb)->sacked;
+
+	if (sacked & TCPCB_SACKED_RETRANS) {
+		u32 rtt_us = tcp_stamp_us_delta(tp->tcp_mstamp,
+						tcp_skb_timestamp_us(skb));
+
+		if (rtt_us < tcp_min_rtt(tp))
+			return false;
+	} else if (sacked & TCPCB_LOST) {
+		return false;
+	}
+
+	return true;
+}
+
 /* Locate the segment named by the NACK in the rtx queue and mark
  * exactly one wire-MSS lost, so the recovery machinery retransmits
  * only what the receiver said was missing — not the whole TSO
@@ -3084,7 +3108,8 @@ static inline bool tcp_skb_should_handle_trimmed(const struct sock *sk,
 static void tcp_trimming_mark_lost(struct sock *sk)
 {
 	struct sk_buff *skb = tcp_rtx_queue_head(sk);
-	u32 nack_seq = tcp_sk(sk)->rx_opt.nack_seq;
+	struct tcp_sock *tp = tcp_sk(sk);
+	u32 nack_seq = tp->rx_opt.nack_seq;
 
 	if (!skb)
 		return;
@@ -3099,6 +3124,8 @@ static void tcp_trimming_mark_lost(struct sock *sk)
 
 		/* Single wire segment already: mark the whole skb. */
 		if (tcp_skb_pcount(skb) <= 1) {
+			if (!tcp_trimming_should_mark_lost(sk, skb))
+				return;
 			tcp_mark_skb_lost(sk, skb);
 			return;
 		}
@@ -3139,6 +3166,8 @@ static void tcp_trimming_mark_lost(struct sock *sk)
 			tcp_fragment(sk, TCP_FRAG_IN_RTX_QUEUE, target,
 				     mss, mss, GFP_ATOMIC);
 
+		if (!tcp_trimming_should_mark_lost(sk, target))
+			return;
 		tcp_mark_skb_lost(sk, target);
 		return;
 	}
