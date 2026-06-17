@@ -942,7 +942,7 @@ static void tcp_rtt_estimator(struct sock *sk, long mrtt_us)
 	tp->srtt_us = max(1U, srtt);
 }
 
-static void tcp_update_pacing_rate(struct sock *sk)
+void tcp_update_pacing_rate(struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
 	u64 rate;
@@ -3046,9 +3046,6 @@ static void __tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb, bool send
 
 	tp->trimming_send_nak = 1;
 	tp->nack_seq_to_send  = TCP_SKB_CB(skb)->seq;
-	pr_info_ratelimited("tcp_trimming: received trimmed packet seq=%u state=%u trimming_ok=%u, sending NACK (receiver)\n",
-			    tp->nack_seq_to_send, sk->sk_state,
-			    tp->rx_opt.trimming_ok);
 	if (send_nack_now)
 		tcp_send_nack_ack(sk);
 	else
@@ -3064,11 +3061,8 @@ static bool tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb, enum skb_dr
 	struct tcphdr *th = tcp_hdr(skb);
 
 	bool discard = false;
-	printk(KERN_DEBUG "tcp_trimming: preprocessing skb seq=%u len=%u th->doff=%u trimming_ok=%u\n",
-	       TCP_SKB_CB(skb)->seq, skb->len, th->doff, tp->rx_opt.trimming_ok);
 
 	if (!tp->rx_opt.trimming_ok) {
-		pr_info_ratelimited("tcp_trimming: ignoring trimmed skb on non-trimming connection (receiver trimming_ok=0)\n");
 		*reason = SKB_DROP_REASON_NOT_SPECIFIED;
 		discard = true;
 	}
@@ -3081,9 +3075,6 @@ static bool tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb, enum skb_dr
 		__tcp_handle_trimmed(sk, skb, /*send_nack_now=*/false);
 
 	} // else, for trimmed pure ACK, just process normally without sending NACK
-
-	printk(KERN_INFO "tcp_trimming: finished preprocessing skb seq=%u len=%u, discard=%d\n",
-	      TCP_SKB_CB(skb)->seq, skb->len, discard);
 
 	return !discard;
 }
@@ -3187,9 +3178,8 @@ static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
 	if (tcp_rtx_queue_empty(sk))
 		return;
 
-	if (*ack_flag & FLAG_NACK) {
+	if (*ack_flag & FLAG_NACK)
 		tcp_trimming_mark_lost(sk);
-	}
 
 	if (unlikely(tcp_is_reno(tp))) {
 		tcp_newreno_mark_lost(sk, *ack_flag & FLAG_SND_UNA_ADVANCED);
@@ -3201,6 +3191,10 @@ static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
 		if (prior_retrans > tp->retrans_out)
 			*ack_flag |= FLAG_LOST_RETRANS;
 	}
+
+	// some bug, dont remember, this was the fix
+	if (tcp_is_reno(tp))
+		tcp_limit_reno_sacked(tp);
 }
 
 /* Process an event, which can update packets-in-flight not trivially.
@@ -4226,6 +4220,13 @@ static int tcp_ack(struct sock *sk, const struct sk_buff *skb, int flag)
 	tcp_rate_gen(sk, delivered, lost, is_sack_reneg, sack_state.rate);
 	tcp_cong_control(sk, ack, delivered, flag, sack_state.rate);
 	tcp_xmit_recovery(sk, rexmit);
+
+	/* We got a NACK for a segment -> path is alive, no need to
+	 * count RTO
+	 */
+	if ((flag & FLAG_NACK) && !(flag & FLAG_SET_XMIT_TIMER))
+		tcp_rearm_rto(sk);
+
 	return 1;
 
 no_queue:
@@ -4248,10 +4249,18 @@ no_queue:
 old_ack:
 	/* If data was SACKed, tag it and see if we should send more data.
 	 * If data was DSACKed, see if we can undo a cwnd reduction.
+	 *
+	 * We can get a NACK inside an old_ACK because od reordering; data
+	 * must be retransmitted anyhow.
 	 */
-	if (TCP_SKB_CB(skb)->sacked) {
-		flag |= tcp_sacktag_write_queue(sk, skb, prior_snd_una,
-						&sack_state);
+	if (tp->rx_opt.trimming_nack_rcvd) {
+		flag |= FLAG_NACK;
+		tp->rx_opt.trimming_nack_rcvd = false;
+	}
+	if (TCP_SKB_CB(skb)->sacked || (flag & FLAG_NACK)) {
+		if (TCP_SKB_CB(skb)->sacked)
+			flag |= tcp_sacktag_write_queue(sk, skb, prior_snd_una,
+							&sack_state);
 		tcp_fastretrans_alert(sk, prior_snd_una, num_dupack, &flag,
 				      &rexmit);
 		tcp_newly_delivered(sk, delivered, flag);
@@ -6735,9 +6744,6 @@ consume:
 		if (tp->rx_opt.trimming_ok) {
 			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
-		pr_info("tcp_trimming: client SYN_SENT->ESTABLISHED trimming_ok=%u sysctl=%u\n",
-			tp->rx_opt.trimming_ok,
-			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming));
 
 		if (tp->rx_opt.saw_tstamp) {
 			tp->rx_opt.tstamp_ok	   = 1;
@@ -7089,10 +7095,6 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		if (tp->rx_opt.trimming_ok) {
 			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
-		pr_info("tcp_trimming: server SYN_RECV->ESTABLISHED trimming_ok=%u sysctl=%u fastopen_rsk=%d\n",
-			tp->rx_opt.trimming_ok,
-			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming),
-			req ? 1 : 0);
 
 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
 

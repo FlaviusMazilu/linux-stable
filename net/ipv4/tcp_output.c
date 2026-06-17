@@ -1025,8 +1025,6 @@ static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb
 		 */
 		opts->options |= OPTION_TRIMMING_NACK;
 		size += TCPOLEN_TRIMMING_NACK_ALIGNED;
-		pr_info_ratelimited("tcp_trimming: emitting NACK option seq=%u (sender)\n",
-				    tp->nack_seq_to_send);
 		tp->trimming_send_nak = 0;
 	}
 

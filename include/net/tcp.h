@@ -691,6 +691,7 @@ void tcp_reset(struct sock *sk, struct sk_buff *skb);
 void tcp_fin(struct sock *sk);
 void tcp_check_space(struct sock *sk);
 void tcp_sack_compress_send_ack(struct sock *sk);
+void tcp_update_pacing_rate(struct sock *sk);
 
 static inline void tcp_cleanup_skb(struct sk_buff *skb)
 {
