@@ -16,13 +16,20 @@ struct nack_ca {
     u32 loss_cwnd;
     u32 nack_count;
     u32 pkts_acked;   /* last observed pkts_acked sample */
+    u32 nack_dec_accum; /* NACKs accumulated toward the next -1 reduction */
     bool nack_pending; /* CA_ACK_NACK seen in in_ack_event for this ACK */
 };
 
-static unsigned int nack_init_ssthresh __read_mostly = 200;
+static unsigned int nack_init_ssthresh __read_mostly = 0;
 module_param(nack_init_ssthresh, uint, 0644);
 MODULE_PARM_DESC(nack_init_ssthresh,
     "Initial ssthresh in segments for new connections (0 = kernel default)");
+
+static unsigned int nack_cwnd_dec_factor __read_mostly = 1;
+module_param(nack_cwnd_dec_factor, uint, 0644);
+MODULE_PARM_DESC(nack_cwnd_dec_factor,
+    "Soften the per-NACK cwnd reduction: reduce by 1/this_factor per NACK "
+    "(apply -1 once every this_factor NACKs; default 1 = -1 per NACK)");
 
 
 static void nack_init(struct sock *sk)
@@ -36,6 +43,7 @@ static void nack_init(struct sock *sk)
     ca->loss_cwnd = 0;
     ca->nack_count = 0;
     ca->pkts_acked = 0;
+    ca->nack_dec_accum = 0;
     ca->nack_pending = false;
 
     if (nack_init_ssthresh)
@@ -152,8 +160,21 @@ static void nack_cong_control(struct sock *sk, u32 ack, int flag,
     ca->nack_pending = false;
 
     if (nack_event) {
+        u32 factor = max_t(u32, nack_cwnd_dec_factor, 1U);
+
         ca->nack_count++;
-        tp->snd_ssthresh = max_t(u32, tp->snd_ssthresh - 1, 2U);
+
+        /* Reduce the PRR target (snd_ssthresh) by 1 MSS for every
+         * `factor` NACKs, i.e. by 1/factor per NACK on average.  The
+         * accumulator carries the fractional remainder across ACKs so
+         * the long-run reduction rate is exactly 1/factor.  factor == 1
+         * reproduces the original "1 MSS per NACK" behaviour; a larger
+         * factor softens the cwnd drop under heavy trimming bursts.
+         */
+        if (++ca->nack_dec_accum >= factor) {
+            ca->nack_dec_accum = 0;
+            tp->snd_ssthresh = max_t(u32, tp->snd_ssthresh - 1, 2U);
+        }
     }
 
     if (tcp_in_cwnd_reduction(sk)) {
