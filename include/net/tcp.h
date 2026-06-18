@@ -691,6 +691,7 @@ void tcp_reset(struct sock *sk, struct sk_buff *skb);
 void tcp_fin(struct sock *sk);
 void tcp_check_space(struct sock *sk);
 void tcp_sack_compress_send_ack(struct sock *sk);
+void tcp_update_pacing_rate(struct sock *sk);
 
 static inline void tcp_cleanup_skb(struct sk_buff *skb)
 {
@@ -954,6 +955,7 @@ enum tcp_skb_cb_sacked_flags {
 	TCPCB_LOST		= (1 << 2),	/* SKB is lost			*/
 	TCPCB_TAGBITS		= (TCPCB_SACKED_ACKED | TCPCB_SACKED_RETRANS |
 				   TCPCB_LOST),	/* All tag bits			*/
+	TCPCB_NACK_FORCED	= (1 << 3),	/* Trimming: NACK-signalled, retransmit past cwnd gate */
 	TCPCB_REPAIRED		= (1 << 4),	/* SKB repaired (no skb_mstamp_ns)	*/
 	TCPCB_EVER_RETRANS	= (1 << 7),	/* Ever retransmitted frame	*/
 	TCPCB_RETRANS		= (TCPCB_SACKED_RETRANS | TCPCB_EVER_RETRANS |

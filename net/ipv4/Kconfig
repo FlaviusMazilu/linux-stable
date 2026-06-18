@@ -647,6 +647,15 @@ config TCP_CONG_DCTCP
 	  For further details see:
 	    http://simula.stanford.edu/~alizade/Site/DCTCP_files/dctcp-final.pdf
 
+config TCP_CONG_NACK
+	tristate "NACK-based congestion control (experimental)"
+	default m
+	help
+	Experimental congestion control intended for trimming experiments.
+	When a trimming NACK is received, this algorithm reduces the
+	congestion window by one MSS (one segment). Useful for quick
+	experiments with NACK-driven rate reduction.
+
 config TCP_CONG_CDG
 	tristate "CAIA Delay-Gradient (CDG)"
 	default n
