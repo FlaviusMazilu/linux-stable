@@ -2389,8 +2389,17 @@ static bool tcp_time_to_recover(struct sock *sk, int flag)
 	if (tp->lost_out)
 		return true;
 
-	/* Not-A-Trick#2 : Classic rule... */
-	if (!tcp_is_rack(sk) && tcp_dupack_heuristics(tp) > tp->reordering)
+	/* Not-A-Trick#2 : Classic rule...
+	 *
+	 * Trimming/NACK: when trimming was negotiated, loss is signalled
+	 * explicitly by NACKs (which set tp->lost_out, caught by Trick#1
+	 * above) and by RTO. Do not enter recovery on the dupack/SACK
+	 * reordering heuristic: this disables dupack-driven fast retransmit
+	 * and removes any dependency on a high tcp_reordering to suppress
+	 * false recovery under reordering.
+	 */
+	if (!tcp_is_rack(sk) && !tp->rx_opt.trimming_ok &&
+	    tcp_dupack_heuristics(tp) > tp->reordering)
 		return true;
 
 	return false;
@@ -2483,6 +2492,27 @@ static inline bool tcp_packet_delayed(const struct tcp_sock *tp)
 {
 	const struct sock *sk = (const struct sock *)tp;
 
+	/* Trimming/NACK: this predicate is the single question the whole undo
+	 * subsystem asks -- "could this 'loss' have been a mere reorder, so the
+	 * recovery was spurious and should be undone?". For a trimming socket a
+	 * loss is signalled by a NACK, which is hard proof that the switch
+	 * actually trimmed the segment; it was never merely delayed. So recovery
+	 * is never spurious and must never be undone. Answering false here is
+	 * the one place that disables tcp_try_undo_recovery(), tcp_try_undo_loss()
+	 * and tcp_try_undo_partial() at once, keeping the normal state-machine
+	 * flow intact instead of scattering FLAG_NACK guards across their call
+	 * sites. F-RTO's own undo (tcp_try_undo_loss(sk, true)) is unaffected: it
+	 * short-circuits on frto_undo before consulting this predicate.
+	 *
+	 * Note for future NACK + inferred-loss hybrids: when loss may also be
+	 * inferred (RACK/NewReno) on a trimming socket, an inferred loss CAN be
+	 * spurious and undo should apply to it. This blanket return would then
+	 * need to be refined to "was THIS recovery episode NACK-driven?" rather
+	 * than keyed on trimming_ok alone.
+	 */
+	if (tp->rx_opt.trimming_ok)
+		return false;
+
 	if (tp->retrans_stamp &&
 	    tcp_tsopt_ecr_before(tp, tp->retrans_stamp))
 		return true;  /* got echoed TS before first retransmission */
@@ -2570,6 +2600,30 @@ static void DBGUNDO(struct sock *sk, const char *msg)
 static void tcp_undo_cwnd_reduction(struct sock *sk, bool unmark_loss)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+
+	/* Trimming/NACK: never reverse a congestion-window reduction nor clear
+	 * loss marks for a trimming socket. Recovery is driven by NACKs, which
+	 * are authoritative proof of real loss -- it is never spurious, so it
+	 * must never be undone. This is the single chokepoint every undo path
+	 * funnels through (tcp_try_undo_recovery/_dsack/_loss/_partial), so one
+	 * gate here closes them all, including the two doors that open once SACK
+	 * is enabled: the DSACK "all retransmits were duplicated" counter
+	 * (tcp_may_undo()/tcp_try_undo_dsack()'s !undo_retrans) and F-RTO
+	 * spurious-RTO undo (tcp_try_undo_loss(sk, true)). SACK can then be on
+	 * purely to keep packets_in_flight accurate, without it ever
+	 * second-guessing recovery, restoring cwnd/ssthresh, or wiping a
+	 * TCPCB_LOST/NACK_FORCED mark.
+	 *
+	 * undo_marker is cleared so the bookkeeping stays consistent (no undo
+	 * is pending) and the undo predicates stop firing for the rest of the
+	 * episode rather than repeatedly reaching this no-op. cwnd, ssthresh,
+	 * lost_out and every per-skb loss mark are deliberately left untouched.
+	 * Only trimming sockets take this branch; normal TCP is unaffected.
+	 */
+	if (tp->rx_opt.trimming_ok) {
+		tp->undo_marker = 0;
+		return;
+	}
 
 	if (unmark_loss) {
 		struct sk_buff *skb;
@@ -3127,6 +3181,9 @@ static void tcp_trimming_mark_lost(struct sock *sk)
 		/* Single wire segment already: mark the whole skb. */
 		if (tcp_skb_pcount(skb) <= 1) {
 			tcp_mark_skb_lost(sk, skb);
+			/* Tag as NACK-signalled so tcp_xmit_retransmit_queue()
+			 * retransmits it past the cwnd>=pif gate. */
+			TCP_SKB_CB(skb)->sacked |= TCPCB_NACK_FORCED;
 			return;
 		}
 
@@ -3167,6 +3224,9 @@ static void tcp_trimming_mark_lost(struct sock *sk)
 				     mss, mss, GFP_ATOMIC);
 
 		tcp_mark_skb_lost(sk, target);
+		/* Tag as NACK-signalled so tcp_xmit_retransmit_queue()
+		 * retransmits it past the cwnd>=pif gate. */
+		TCP_SKB_CB(target)->sacked |= TCPCB_NACK_FORCED;
 		return;
 	}
 }
@@ -3178,18 +3238,37 @@ static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
 	if (tcp_rtx_queue_empty(sk))
 		return;
 
-	if (*ack_flag & FLAG_NACK)
-		tcp_trimming_mark_lost(sk);
+	/* Trimming/NACK: the NACK is the authoritative loss signal and is
+	 * already marked lost up-front in tcp_fastretrans_alert() (before its
+	 * sack-reneging/undo early-returns). Skip ALL heuristic loss marking
+	 * here for trimming sockets -- both NewReno head-of-line marking and
+	 * RACK timing -- so the socket retransmits only what the receiver
+	 * actually NACKed (plus RTO), i.e. true "NACK + RTO only" recovery.
+	 *
+	 * This mirrors how tcp_update_scoreboard() (the RFC3517 SACK
+	 * scoreboard) is already gated off for trimming sockets. Without this
+	 * gate, tcp_newreno_mark_lost() marks the rtx-queue head lost on every
+	 * partial ACK during recovery with no NACK behind it, retransmitting
+	 * data the receiver never reported as trimmed; under reordering one
+	 * copy is delivered while the spurious retransmit arrives trimmed and
+	 * late, which makes the receiver emit a phantom NACK for already-
+	 * delivered data. Gating it removes those non-NACK retransmits and the
+	 * phantom NACKs they cause.
+	 *
+	 * tcp_limit_reno_sacked() below still runs so the reno dupack-emulation
+	 * accounting (sacked_out, used for packets-in-flight) stays consistent.
+	 */
+	if (!tp->rx_opt.trimming_ok) {
+		if (unlikely(tcp_is_reno(tp))) {
+			tcp_newreno_mark_lost(sk, *ack_flag & FLAG_SND_UNA_ADVANCED);
+		} else if (tcp_is_rack(sk)) {
+			u32 prior_retrans = tp->retrans_out;
 
-	if (unlikely(tcp_is_reno(tp))) {
-		tcp_newreno_mark_lost(sk, *ack_flag & FLAG_SND_UNA_ADVANCED);
-	} else if (tcp_is_rack(sk)) {
-		u32 prior_retrans = tp->retrans_out;
-
-		if (tcp_rack_mark_lost(sk))
-			*ack_flag &= ~FLAG_SET_XMIT_TIMER;
-		if (prior_retrans > tp->retrans_out)
-			*ack_flag |= FLAG_LOST_RETRANS;
+			if (tcp_rack_mark_lost(sk))
+				*ack_flag &= ~FLAG_SET_XMIT_TIMER;
+			if (prior_retrans > tp->retrans_out)
+				*ack_flag |= FLAG_LOST_RETRANS;
+		}
 	}
 
 	// some bug, dont remember, this was the fix
@@ -3222,6 +3301,87 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 	if (!tp->packets_out && tp->sacked_out)
 		tp->sacked_out = 0;
 
+	/* Trimming/NACK: register the explicitly NACKed loss up-front, before
+	 * the sack-reneging (B) and undo (D/E) early-returns below. Those paths
+	 * can return without ever reaching tcp_identify_packet_loss(), which is
+	 * where the NACK used to be turned into a lost-mark; a NACK riding such
+	 * an ACK was then consumed (FLAG_NACK set) but never acted on, so the
+	 * hole was repaired only by RTO. Marking here is authoritative and
+	 * idempotent: tcp_mark_skb_lost() guards the LOST bit, and
+	 * tcp_trimming_mark_lost() no-ops on an empty queue or an already-ACKed
+	 * seq. It runs before tcp_time_to_recover(), so lost_out>0 drives a
+	 * clean recovery entry, exactly as the old in-E-section call did.
+	 *
+	 * This is now the ONLY NACK mark site -- the FLAG_NACK branch was
+	 * removed from tcp_identify_packet_loss() -- and tcp_fastretrans_alert()
+	 * runs at most once per ACK (main path via tcp_ack_is_dubious(), or the
+	 * old_ack path), so the NACKed segment is marked exactly once.
+	 *
+	 * Also arm the retransmit here: the sack-reneging (B) and undo (D/E)
+	 * early-returns below can skip the bottom-of-function *rexmit assignment,
+	 * leaving rexmit == REXMIT_NONE so tcp_ack()'s tcp_xmit_recovery() never
+	 * runs the (forced) retransmit pass and the marked-lost hole waits for an
+	 * RTO. rexmit is a pointer read by tcp_ack() after we return, and the
+	 * early-returns leave it untouched, so setting it now guarantees the
+	 * NACKed segment is retransmitted on this same ACK.
+	 */
+	if (flag & FLAG_NACK) {
+		tcp_trimming_mark_lost(sk);
+		*rexmit = REXMIT_LOST;
+
+		/* Trimming/NACK: the up-front mark above bumped lost_out
+		 * out-of-band -- i.e. before the C-section tcp_verify_left_out()
+		 * consistency check below. For a NewReno socket sacked_out is not
+		 * tied to specific skbs but is a dupack fiction that
+		 * tcp_limit_reno_sacked() keeps pinned near packets_out; the
+		 * freshly marked loss then claims a window slot the fiction
+		 * already counted, so sacked_out + lost_out can momentarily exceed
+		 * packets_out and trip WARN_ON in tcp_verify_left_out(). Re-cap
+		 * sacked_out now (exactly as tcp_identify_packet_loss() does after
+		 * its own marking, only that runs later in the E-section) so a
+		 * real NACK-signalled loss correctly displaces one fictional
+		 * dupack. SACK sockets are untouched: there sacked_out is exact
+		 * and tcp_mark_skb_lost()'s SACKED_ACKED guard already prevents
+		 * the double count.
+		 */
+		if (tcp_is_reno(tp))
+			tcp_limit_reno_sacked(tp);
+
+		/* Fold a re-trimming NACK storm into a single recovery
+		 * episode. The forced retransmit pass
+		 * (tcp_force_retransmit_nacked) sends NACK-marked segments
+		 * regardless of where they sit relative to the recovery
+		 * boundary tp->high_seq. When a NACK names data above
+		 * high_seq, that segment is retransmitted (retrans_out++) but
+		 * is not covered by the current episode; once snd_una reaches
+		 * the old high_seq the state machine completes recovery into
+		 * TCP_CA_Open while those forced retransmits are still in
+		 * flight (retrans_out > 0), which trips the
+		 * WARN_ON(retrans_out != 0) in the D-section Open branch and
+		 * forces a fresh ssthresh cut on the next sub-burst. Pushing
+		 * high_seq up to snd_nxt keeps snd_una < high_seq while the
+		 * storm is ongoing, so the socket stays in Recovery until
+		 * every NACKed segment has drained -- one episode, one
+		 * ssthresh reduction, and a clean exit to Open with
+		 * retrans_out == 0.
+		 *
+		 * Applied in every state except TCP_CA_Loss: while in
+		 * TCP_CA_Recovery this keeps us in recovery (snd_una stays
+		 * below high_seq) for as long as NACKs keep arriving, folding
+		 * the whole storm into one episode; in TCP_CA_Open/Disorder/CWR
+		 * it pre-sets the boundary for the recovery we are about to
+		 * (re-)enter in the E-section below (see the trimming_ok
+		 * exemption in the D-section Open branch). CA_Loss is left
+		 * untouched: it is
+		 * RTO-driven and owns high_seq for F-RTO, and is not reached in
+		 * these NACK-only storms. Only trimming sockets ever set
+		 * FLAG_NACK, so normal TCP is untouched.
+		 */
+		if (icsk->icsk_ca_state != TCP_CA_Loss &&
+		    after(tp->snd_nxt, tp->high_seq))
+			tp->high_seq = tp->snd_nxt;
+	}
+
 	/* Now state machine starts.
 	 * A. ECE, hence prohibit cwnd undoing, the reduction is required. */
 	if (ece_ack)
@@ -3237,8 +3397,24 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 	/* D. Check state exit conditions. State can be terminated
 	 *    when high_seq is ACKed. */
 	if (icsk->icsk_ca_state == TCP_CA_Open) {
-		WARN_ON(tp->retrans_out != 0 && !tp->syn_data);
-		tp->retrans_stamp = 0;
+		/* Trimming/NACK: "Open with retrans_out > 0" is a legitimate state
+		 * for a trimming socket. The forced retransmit pass
+		 * (tcp_force_retransmit_nacked) sends NACK-marked segments anywhere
+		 * in the rtx queue, bypassing both the cwnd gate and the recovery
+		 * boundary, so once a cumulative ACK completes recovery into Open
+		 * those NACK-forced retransmits can still be in flight. The stock
+		 * WARN_ON(retrans_out != 0) is a NewReno invariant that the forced
+		 * pass deliberately breaks, so exempt trimming sockets from it, and
+		 * only clear retrans_stamp once nothing is outstanding (keeping the
+		 * retransmit clock correct for ETIMEDOUT while forced retransmits
+		 * remain). Normal TCP keeps the original invariant check intact.
+		 */
+		if (!tp->rx_opt.trimming_ok) {
+			WARN_ON(tp->retrans_out != 0 && !tp->syn_data);
+			tp->retrans_stamp = 0;
+		} else if (!tp->retrans_out) {
+			tp->retrans_stamp = 0;
+		}
 	} else if (!before(tp->snd_una, tp->high_seq)) {
 		switch (icsk->icsk_ca_state) {
 		case TCP_CA_CWR:
@@ -3324,7 +3500,13 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 		fast_rexmit = 1;
 	}
 
-	if (!tcp_is_rack(sk) && do_lost)
+	/* Trimming/NACK: NACK is the primary loss signal (it sets lost_out,
+	 * caught by tcp_time_to_recover Trick#1) together with RTO. Skip the
+	 * RFC6675/RFC3517 SACK scoreboard for trimming sockets so no SACK-driven
+	 * fast retransmit occurs; sacked_out accounting stays intact so SACK is
+	 * still accurate for packets-in-flight. Only NACK and RTO retransmit.
+	 */
+	if (!tcp_is_rack(sk) && !tp->rx_opt.trimming_ok && do_lost)
 		tcp_update_scoreboard(sk, fast_rexmit);
 	*rexmit = REXMIT_LOST;
 }
@@ -6152,6 +6334,45 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
 	if (!tcp_fast_parse_options(sock_net(sk), skb, th, tp) ||
 	    !tp->rx_opt.saw_tstamp ||
 	    tcp_paws_check(&tp->rx_opt, TCP_PAWS_WINDOW))
+		goto step1;
+
+	/* Trimming/NACK: tcp_fast_parse_options() above has already parsed a
+	 * NACK off this segment (tp->rx_opt.trimming_nack_rcvd). Under
+	 * reverse-path reordering the NACK-bearing pure ACK frequently arrives
+	 * with a TSval older than ts_recent and would be PAWS-discarded here,
+	 * destroying the (one-shot, non-redundant) NACK and forcing an RTO. The
+	 * NACK names an absolute sequence that needs retransmission and is
+	 * meaningful regardless of the carrier ACK's timestamp ordering, so let
+	 * it bypass PAWS and reach tcp_ack(), where the NACK is consumed.
+	 *
+	 * This is safe: a stale/wrapped carrier cannot do harm because
+	 * tcp_trimming_mark_lost() only acts on a seq still in the rtx queue
+	 * (else it no-ops), and ts_recent is not advanced from this out-of-date
+	 * segment (tcp_replace_ts_recent()/tcp_paws_check() still reject it).
+	 * Scope is deliberately narrow (only when a NACK is present) so normal
+	 * data and ACK traffic keep full PAWS protection.
+	 */
+	if (tp->rx_opt.trimming_ok && tp->rx_opt.trimming_nack_rcvd)
+		goto step1;
+
+	/* Trimming: a DSCP-marked trimmed segment is not always consumed by
+	 * tcp_handle_trimmed() at the top of tcp_rcv_established(). When its
+	 * payload is still intact (the shave was below the trimmer's
+	 * granularity) or it is a trimmed pure ACK, the handler lets it fall
+	 * through into normal processing, so a reordered one reaches this PAWS
+	 * check. Such a segment carries a congestion/loss signal (it arms a
+	 * NACK) and in-window data the receiver needs; under forward-path
+	 * reordering its TSval can look stale and PAWS would silently drop it,
+	 * forcing an RTO. Let any trimmed segment bypass PAWS and reach step1.
+	 *
+	 * Safe for the same reasons as the NACK bypass above: the sequence
+	 * number check (step1) still rejects out-of-window segments, and
+	 * ts_recent is not advanced from a segment that failed PAWS
+	 * (tcp_replace_ts_recent()/tcp_paws_check() still reject it). Scope is
+	 * narrow (only DSCP-marked trimmed segments) so normal traffic keeps
+	 * full PAWS protection.
+	 */
+	if (tp->rx_opt.trimming_ok && TCP_SKB_CB(skb)->trimmed)
 		goto step1;
 
 	reason = tcp_disordered_ack_check(sk, skb);

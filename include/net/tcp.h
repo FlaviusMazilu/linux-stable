@@ -955,6 +955,7 @@ enum tcp_skb_cb_sacked_flags {
 	TCPCB_LOST		= (1 << 2),	/* SKB is lost			*/
 	TCPCB_TAGBITS		= (TCPCB_SACKED_ACKED | TCPCB_SACKED_RETRANS |
 				   TCPCB_LOST),	/* All tag bits			*/
+	TCPCB_NACK_FORCED	= (1 << 3),	/* Trimming: NACK-signalled, retransmit past cwnd gate */
 	TCPCB_REPAIRED		= (1 << 4),	/* SKB repaired (no skb_mstamp_ns)	*/
 	TCPCB_EVER_RETRANS	= (1 << 7),	/* Ever retransmitted frame	*/
 	TCPCB_RETRANS		= (TCPCB_SACKED_RETRANS | TCPCB_EVER_RETRANS |

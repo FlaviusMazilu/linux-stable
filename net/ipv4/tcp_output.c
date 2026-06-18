@@ -2925,9 +2925,13 @@ bool tcp_schedule_loss_probe(struct sock *sk, bool advancing_rto)
 	early_retrans = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_early_retrans);
 	/* Schedule a loss probe in 2*RTT for SACK capable connections
 	 * not in loss recovery, that are either limited by cwnd or application.
+	 *
+	 * Trimming/NACK: TLP is gated on SACK (not RACK), so it would arm as
+	 * soon as SACK is enabled. Disable it for trimming connections so the
+	 * only retransmit triggers remain NACK and RTO.
 	 */
 	if ((early_retrans != 3 && early_retrans != 4) ||
-	    !tp->packets_out || !tcp_is_sack(tp) ||
+	    !tp->packets_out || !tcp_is_sack(tp) || tp->rx_opt.trimming_ok ||
 	    (icsk->icsk_ca_state != TCP_CA_Open &&
 	     icsk->icsk_ca_state != TCP_CA_CWR))
 		return false;
@@ -3513,6 +3517,62 @@ int tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb, int segs)
 	return err;
 }
 
+/* Trimming/NACK: retransmit segments the receiver explicitly NACKed,
+ * bypassing the cwnd >= packets_in_flight gate.
+ *
+ * A NACK is authoritative proof that a specific segment was lost. With SACK
+ * on, sacked_out reflects the data delivered above the hole, so packets_in_flight
+ * deflates and the normal gate in tcp_xmit_retransmit_queue() fires by itself.
+ * With SACK off there is no such feedback: packets_in_flight stays inflated, the
+ * gate stays shut, and the hole is only repaired by an RTO. To avoid that,
+ * retransmit just the NACK-marked (TCPCB_NACK_FORCED) lost segments here while
+ * ignoring the cwnd gate. Pacing and the local TSQ limit are still honoured.
+ *
+ * The flag is one-shot: it is cleared once the segment is (re)transmitted, so a
+ * fresh NACK (e.g. after a re-trim) is required to force it again. Scope is
+ * limited to trimming sockets because only tcp_trimming_mark_lost() sets the
+ * flag. Returns true if the rtx-queue head was retransmitted (caller rearms the
+ * RTO timer).
+ */
+static bool __maybe_unused tcp_force_retransmit_nacked(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct sk_buff *rtx_head = tcp_rtx_queue_head(sk);
+	struct sk_buff *skb = rtx_head;
+	bool sent_head = false;
+
+	skb_rbtree_walk_from(skb) {
+		__u8 sacked = TCP_SKB_CB(skb)->sacked;
+
+		/* Stop once every lost segment has been (re)transmitted. */
+		if (tp->retrans_out >= tp->lost_out)
+			break;
+		/* Force only segments that are LOST and NACK-signalled, and
+		 * not already SACKed or retransmitted.
+		 */
+		if ((sacked & (TCPCB_LOST | TCPCB_NACK_FORCED |
+			       TCPCB_SACKED_ACKED | TCPCB_SACKED_RETRANS)) !=
+		    (TCPCB_LOST | TCPCB_NACK_FORCED))
+			continue;
+		if (tcp_pacing_check(sk))
+			break;
+		if (tcp_small_queue_check(sk, skb, 1))
+			break;
+		if (tcp_retransmit_skb(sk, skb, 1))
+			break;
+
+		/* One-shot: consume the NACK force tag. */
+		TCP_SKB_CB(skb)->sacked &= ~TCPCB_NACK_FORCED;
+		if (skb == rtx_head)
+			sent_head = true;
+		if (tcp_in_cwnd_reduction(sk))
+			tp->prr_out += tcp_skb_pcount(skb);
+		NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPFASTRETRANS,
+			      tcp_skb_pcount(skb));
+	}
+	return sent_head;
+}
+
 /* This gets called after a retransmit timeout, and the initially
  * retransmitted data is acknowledged.  It tries to continue
  * resending the rest of the retransmit queue, until either
@@ -3529,6 +3589,13 @@ void tcp_xmit_retransmit_queue(struct sock *sk)
 
 	if (!tp->packets_out)
 		return;
+
+	/* Trimming/NACK: first force-retransmit any NACK-signalled losses past
+	 * the cwnd>=pif gate (see tcp_force_retransmit_nacked). Only trimming
+	 * sockets ever carry TCPCB_NACK_FORCED. */
+	// if (tp->rx_opt.trimming_ok && tp->lost_out > tp->retrans_out &&
+	//     tcp_force_retransmit_nacked(sk))
+	// 	rearm_timer = true;
 
 	rtx_head = tcp_rtx_queue_head(sk);
 	skb = tp->retransmit_skb_hint ?: rtx_head;
