@@ -3046,7 +3046,7 @@ static void tcp_handle_trimmed(struct sock *sk, struct sk_buff *skb)
 
 	tp->trimming_send_nak = 1;
 	tp->nack_seq_to_send  = TCP_SKB_CB(skb)->seq;
-	pr_info_ratelimited("tcp_trimming: received trimmed packet seq=%u state=%u trimming_ok=%u, sending NACK (receiver)\n",
+	pr_debug_ratelimited("tcp_trimming: received trimmed packet seq=%u state=%u trimming_ok=%u, sending NACK (receiver)\n",
 			    tp->nack_seq_to_send, sk->sk_state,
 			    tp->rx_opt.trimming_ok);
 	tcp_send_nack_ack(sk);
@@ -3100,10 +3100,8 @@ static bool tcp_trimming_should_mark_lost(struct sock *sk, const struct sk_buff 
  *
  * If the named segment is no longer in the rtx queue (already ACKed —
  * the "trimmer marked but payload survived" case — or the queue is
- * empty), this no-ops. tcp_time_to_recover() will then return false
- * and tcp_fastretrans_alert() falls through to tcp_try_to_open(),
- * which converts the NACK into a CWR transition (mirroring how ECE
- * is handled).
+ * empty), this no-ops. A stale NACK must not by itself cause a new
+ * congestion-window reduction.
  */
 static void tcp_trimming_mark_lost(struct sock *sk)
 {
@@ -3181,7 +3179,15 @@ static void tcp_identify_packet_loss(struct sock *sk, int *ack_flag)
 		return;
 
 	if (*ack_flag & FLAG_NACK) {
+		u32 prior_lost = tp->lost;
+
 		tcp_trimming_mark_lost(sk);
+		if (tp->lost != prior_lost)
+			NET_ADD_STATS(sock_net(sk), LINUX_MIB_TCPTRIMMINGLOSSMARKS,
+				      tp->lost - prior_lost);
+		else
+			NET_INC_STATS(sock_net(sk),
+				      LINUX_MIB_TCPTRIMMINGNACKSUNPRODUCTIVE);
 	}
 
 	if (unlikely(tcp_is_reno(tp))) {
@@ -4468,6 +4474,7 @@ void tcp_parse_options(const struct net *net,
 				if (opsize == TCPOLEN_TRIMMING_NACK &&
 					estab &&
 					opt_rx->trimming_ok) {
+						NET_INC_STATS(net, LINUX_MIB_TCPTRIMMINGNACKSRECEIVED);
 						opt_rx->trimming_nack_rcvd = 1;
 						opt_rx->nack_seq = get_unaligned_be32(ptr);
 					}
@@ -6294,7 +6301,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
 
 	if (TCP_SKB_CB(skb)->trimmed) {
 		if (!tp->rx_opt.trimming_ok) {
-			pr_info_ratelimited("tcp_trimming: ignoring trimmed skb on non-trimming connection (receiver trimming_ok=0)\n");
+			pr_debug_ratelimited("tcp_trimming: ignoring trimmed skb on non-trimming connection (receiver trimming_ok=0)\n");
 			reason = SKB_DROP_REASON_NOT_SPECIFIED;
 			goto discard;
 		}
@@ -6736,7 +6743,7 @@ consume:
 		if (tp->rx_opt.trimming_ok) {
 			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
-		pr_info("tcp_trimming: client SYN_SENT->ESTABLISHED trimming_ok=%u sysctl=%u\n",
+		pr_debug("tcp_trimming: client SYN_SENT->ESTABLISHED trimming_ok=%u sysctl=%u\n",
 			tp->rx_opt.trimming_ok,
 			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming));
 
@@ -7069,7 +7076,7 @@ tcp_rcv_state_process(struct sock *sk, struct sk_buff *skb)
 		if (tp->rx_opt.trimming_ok) {
 			inet_sk(sk)->tos = (inet_sk(sk)->tos & INET_ECN_MASK) | (DSCP_TRIMMABLE << 2);
 		}
-		pr_info("tcp_trimming: server SYN_RECV->ESTABLISHED trimming_ok=%u sysctl=%u fastopen_rsk=%d\n",
+		pr_debug("tcp_trimming: server SYN_RECV->ESTABLISHED trimming_ok=%u sysctl=%u fastopen_rsk=%d\n",
 			tp->rx_opt.trimming_ok,
 			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_trimming),
 			req ? 1 : 0);
