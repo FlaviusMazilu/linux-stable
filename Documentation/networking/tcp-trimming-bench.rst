@@ -32,3 +32,19 @@ enabled as a safety net. Do not blindly use INT_MAX: sequence-space tests
 multiply the reordering threshold by MSS, so choose a bound whose product
 is below 2**31. A threshold alone is not proof that no other recovery path
 ran; verify the counters and retransmitted sequence ranges.
+
+NACK-triggered recovery and the SACK scoreboard
+--------------------------------------------
+
+Entering Recovery because of a NACK must not force the SACK scoreboard's
+``fast_rexmit`` head-loss shortcut. That shortcut assumes the oldest
+unacknowledged skb was lost; a NACK may instead name a later segment.
+With a reordered NACK, it could mark an earlier multi-segment skb lost even
+with a reordering threshold of one million. The benchmark reproduced three
+wire retransmissions from just one NACK loss mark, with no RTO or TLP.
+
+The forced-head shortcut is therefore disabled for NACK-bearing ACKs.
+Ordinary duplicate-ACK recovery is unchanged, and sufficient SACK evidence
+still updates the scoreboard on such ACKs. RACK processing is also unchanged.
+This is deliberately narrower than disabling the scoreboard on every
+connection that negotiated trimming.

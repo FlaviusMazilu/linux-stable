@@ -3329,8 +3329,9 @@ static void tcp_fastretrans_alert(struct sock *sk, const u32 prior_snd_una,
 		fast_rexmit = 1;
 	}
 
+	/* A NACK proves its named loss, not a loss at the queue head. */
 	if (!tcp_is_rack(sk) && do_lost)
-		tcp_update_scoreboard(sk, fast_rexmit);
+		tcp_update_scoreboard(sk, fast_rexmit && !(flag & FLAG_NACK));
 	*rexmit = REXMIT_LOST;
 }
 
