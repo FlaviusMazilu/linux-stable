@@ -128,13 +128,15 @@ measured performance improvements:
 * **SACK compression:** 416dd649f3aa adds
   ``tcp_comp_sack_rtt_percent`` and changes the default from the old fixed
   5% to 33%. The nominal delay remains capped at 1 ms; timer slack is now
-  10 us instead of 100 us. At a 10 ms RTT, the nominal cap changes the
+  10 us instead of 100 us (ca412f25d6b2). At a 10 ms RTT, the nominal cap changes the
   example delay from 0.5 ms to 1 ms. This can affect feedback timing in
   short flows; it is not an ACK-ratio protocol or RACK-only feature.
 * **Direct recovery instrumentation:** 8e677a466145 adds the raw tracepoint
   ``tcp_cwnd_reduction_tp``. This provides a hook for observing the
   congestion-window reduction path rather than inferring every internal
-  PRR decision from captures. It is not a regular tracefs event.
+  PRR decision from captures. It is not a regular tracefs event, and it is
+  emitted after the zero-delivery early return: pure NACKs need not produce
+  an event.
 * **RTO controls:** 54a378f43425, 1280c26228bd, and f38805c5d26f add
   maximum-RTO controls and the ``TCP_RTO_MIN_US`` socket option. Current
   documentation describes route/socket/sysctl precedence; defaults remain
@@ -168,3 +170,45 @@ measured performance improvements:
 Old and new kernel results must remain separate. An integration smoke run
 does not establish that the earlier performance conclusions still hold on
 7.3.3, and does not recreate a valid trimming-only configuration.
+
+Integration validation
+~~~~~~~~~~~~~~~~~~~~~~
+
+The code merge is 822c3f28c1809cd8ed55f612ccff003f3969eb17. An isolated
+detached worktree was built from that commit with the previously tested
+configuration migrated using ``make olddefconfig`` and a distinct
+``-trimbench-upstream`` local version. ``bzImage`` and modules built with
+GCC 13.3.0, and the unchanged ``sch_trimbench`` source built against the new
+kernel. The booted release was
+``7.3.3-trimbench-upstream-00021-g822c3f28c180``.
+
+Three one-vCPU KVM integration suites completed without invalid trials or
+reported kernel errors:
+
+* 18 ordinary cases: nine scenarios in ``rack`` and ``trim_rack``, including
+  head/middle/tail losses, three-packet bursts, reordered NACKs, and silently
+  dropped tails.
+* Eight forward-reordering cases: head and middle-burst faults with
+  reordering off/on in both supported modes.
+* Four AccECN cases: clean and first-segment loss in both modes, with
+  ``tcp_ecn=3`` in an isolated harness snapshot. Captures contain valid
+  AccECN options and a packet carrying both AccECN and a trimming NACK.
+
+All 68 pcaps were independently reread. The standard capture checks verify
+negotiation, exact trim/NACK correspondence, sequence numbers, header-only
+CS6 NACKs, and preserved checksums. Runtime sysctl snapshots confirm the
+new SACK compression defaults and unchanged default RTO bounds.
+
+Artifacts are kept separately under the infrastructure repository's
+``bench/artifacts/upstream-7.3.3/`` directory. It contains the pinned build
+worktree, configuration delta, isolated harness and build manifest, and
+``smoke-default``, ``smoke-forward``, and ``smoke-accecn`` results with source
+snapshots. The original build manifest, image, config, qdisc module, and
+initramfs were hash-checked and remain unchanged.
+
+``git diff --check`` passes for the custom delta against v7.3.3. The strict
+checkpatch run still reports inherited trimming style issues: two errors,
+11 warnings, and 11 checks, versus two errors, 12 warnings, and 11 checks
+for the same file set in the old fork. Those pre-existing issues were not
+silently treated as a clean lint result or expanded into an unrelated
+formatting cleanup.
