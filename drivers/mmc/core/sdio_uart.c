@@ -104,6 +104,9 @@ static int sdio_uart_add_port(struct sdio_uart_port *port)
 	}
 	spin_unlock(&sdio_uart_table_lock);
 
+	if (ret)
+		kfifo_free(&port->xmit_fifo);
+
 	return ret;
 }
 
@@ -471,7 +474,7 @@ static void sdio_uart_check_modem_status(struct sdio_uart_port *port)
 		port->icount.cts++;
 		tty = tty_port_tty_get(&port->port);
 		if (tty && C_CRTSCTS(tty)) {
-			int cts = (status & UART_MSR_CTS);
+			bool cts = status & UART_MSR_CTS;
 			if (tty->hw_stopped) {
 				if (cts) {
 					tty->hw_stopped = false;
@@ -1021,7 +1024,7 @@ static int sdio_uart_probe(struct sdio_func *func,
 	struct sdio_uart_port *port;
 	int ret;
 
-	port = kzalloc(sizeof(struct sdio_uart_port), GFP_KERNEL);
+	port = kzalloc_obj(struct sdio_uart_port);
 	if (!port)
 		return -ENOMEM;
 

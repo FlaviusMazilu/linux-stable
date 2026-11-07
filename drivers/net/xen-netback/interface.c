@@ -329,7 +329,7 @@ static void xenvif_down(struct xenvif *vif)
 		if (queue->tx_irq != queue->rx_irq)
 			disable_irq(queue->rx_irq);
 		napi_disable(&queue->napi);
-		del_timer_sync(&queue->credit_timeout);
+		timer_delete_sync(&queue->credit_timeout);
 	}
 }
 
@@ -812,8 +812,6 @@ void xenvif_disconnect_data(struct xenvif *vif)
 
 		xenvif_disconnect_queue(queue);
 	}
-
-	xenvif_mcast_addr_list_free(vif);
 }
 
 void xenvif_disconnect_ctrl(struct xenvif *vif)

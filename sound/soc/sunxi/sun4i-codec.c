@@ -22,12 +22,13 @@
 #include <linux/gpio/consumer.h>
 
 #include <sound/core.h>
+#include <sound/dmaengine_pcm.h>
+#include <sound/initval.h>
+#include <sound/jack.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/tlv.h>
-#include <sound/initval.h>
-#include <sound/dmaengine_pcm.h>
 
 /* Codec DAC digital controls and FIFO registers */
 #define SUN4I_CODEC_DAC_DPC			(0x00)
@@ -331,6 +332,7 @@ struct sun4i_codec {
 	struct clk	*clk_module;
 	struct reset_control *rst;
 	struct gpio_desc *gpio_pa;
+	struct gpio_desc *gpio_hp;
 
 	/* ADC_FIFOC register is at different offset on different SoCs */
 	struct regmap_field *reg_adc_fifoc;
@@ -1583,6 +1585,49 @@ static struct snd_soc_dai_driver dummy_cpu_dai = {
 	.ops = &dummy_dai_ops,
 };
 
+static struct snd_soc_jack sun4i_headphone_jack;
+
+static struct snd_soc_jack_pin sun4i_headphone_jack_pins[] = {
+	{ .pin = "Headphone", .mask = SND_JACK_HEADPHONE },
+};
+
+static struct snd_soc_jack_gpio sun4i_headphone_jack_gpio = {
+	.name = "hp-det",
+	.report = SND_JACK_HEADPHONE,
+	.debounce_time = 150,
+};
+
+static int sun4i_codec_machine_init(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_card *card = rtd->card;
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
+	int ret;
+
+	if (scodec->gpio_hp) {
+		ret = snd_soc_card_jack_new_pins(card, "Headphone Jack",
+						 SND_JACK_HEADPHONE,
+						 &sun4i_headphone_jack,
+						 sun4i_headphone_jack_pins,
+						 ARRAY_SIZE(sun4i_headphone_jack_pins));
+		if (ret) {
+			dev_err(rtd->dev,
+				"Headphone jack creation failed: %d\n", ret);
+			return ret;
+		}
+
+		sun4i_headphone_jack_gpio.desc = scodec->gpio_hp;
+		ret = snd_soc_jack_add_gpios(&sun4i_headphone_jack, 1,
+					     &sun4i_headphone_jack_gpio);
+
+		if (ret) {
+			dev_err(rtd->dev, "Headphone GPIO not added: %d\n", ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
 static struct snd_soc_dai_link *sun4i_codec_create_link(struct device *dev,
 							int *num_links)
 {
@@ -1608,6 +1653,7 @@ static struct snd_soc_dai_link *sun4i_codec_create_link(struct device *dev,
 	link->codecs->name	= dev_name(dev);
 	link->platforms->name	= dev_name(dev);
 	link->dai_fmt		= SND_SOC_DAIFMT_I2S;
+	link->init		= sun4i_codec_machine_init;
 
 	*num_links = 1;
 
@@ -1617,7 +1663,8 @@ static struct snd_soc_dai_link *sun4i_codec_create_link(struct device *dev,
 static int sun4i_codec_spk_event(struct snd_soc_dapm_widget *w,
 				 struct snd_kcontrol *k, int event)
 {
-	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(w->dapm->card);
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
+	struct sun4i_codec *scodec = snd_soc_card_get_drvdata(card);
 
 	gpiod_set_value_cansleep(scodec->gpio_pa,
 				 !!SND_SOC_DAPM_EVENT_ON(event));
@@ -1916,10 +1963,11 @@ static const struct snd_soc_component_driver sun50i_h616_codec_codec = {
 };
 
 static const struct snd_kcontrol_new sun50i_h616_card_controls[] = {
-	SOC_DAPM_PIN_SWITCH("LINEOUT"),
+	SOC_DAPM_PIN_SWITCH("Speaker"),
 };
 
 static const struct snd_soc_dapm_widget sun50i_h616_codec_card_dapm_widgets[] = {
+	SND_SOC_DAPM_HP("Headphone", NULL),
 	SND_SOC_DAPM_LINE("Line Out", NULL),
 	SND_SOC_DAPM_SPK("Speaker", sun4i_codec_spk_event),
 };
@@ -1966,6 +2014,7 @@ static struct snd_soc_card *sun50i_h616_codec_create_card(struct device *dev)
 	card->dev		= dev;
 	card->owner		= THIS_MODULE;
 	card->name		= "H616 Audio Codec";
+	card->long_name		= "h616-audio-codec";
 	card->driver_name	= "sun4i-codec";
 	card->controls		= sun50i_h616_card_controls;
 	card->num_controls	= ARRAY_SIZE(sun50i_h616_card_controls);
@@ -2188,6 +2237,7 @@ static const struct sun4i_codec_quirks sun50i_h616_codec_quirks = {
 	.reg_dac_fifoc	= REG_FIELD(SUN50I_H616_CODEC_DAC_FIFOC, 0, 31),
 	.reg_dac_txdata	= SUN8I_H3_CODEC_DAC_TXDATA,
 	.has_reset	= true,
+	.playback_only	= true,
 	.dma_max_burst	= SUN4I_DMA_MAX_BURST,
 };
 
@@ -2267,60 +2317,54 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 
 	scodec->regmap = devm_regmap_init_mmio(&pdev->dev, base,
 					       quirks->regmap_config);
-	if (IS_ERR(scodec->regmap)) {
-		dev_err(&pdev->dev, "Failed to create our regmap\n");
-		return PTR_ERR(scodec->regmap);
-	}
+	if (IS_ERR(scodec->regmap))
+		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->regmap),
+				     "Failed to create our regmap\n");
 
 	/* Get the clocks from the DT */
 	scodec->clk_apb = devm_clk_get_enabled(&pdev->dev, "apb");
-	if (IS_ERR(scodec->clk_apb)) {
-		dev_err(&pdev->dev, "Failed to get the APB clock\n");
-		return PTR_ERR(scodec->clk_apb);
-	}
+	if (IS_ERR(scodec->clk_apb))
+		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->clk_apb),
+				     "Failed to get the APB clock\n");
 
 	scodec->clk_module = devm_clk_get(&pdev->dev, "codec");
-	if (IS_ERR(scodec->clk_module)) {
-		dev_err(&pdev->dev, "Failed to get the module clock\n");
-		return PTR_ERR(scodec->clk_module);
-	}
+	if (IS_ERR(scodec->clk_module))
+		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->clk_module),
+				     "Failed to get the module clock\n");
 
 	if (quirks->has_reset) {
 		scodec->rst = devm_reset_control_get_exclusive_deasserted(&pdev->dev, NULL);
-		if (IS_ERR(scodec->rst)) {
-			dev_err(&pdev->dev, "Failed to get reset control\n");
-			return PTR_ERR(scodec->rst);
-		}
+		if (IS_ERR(scodec->rst))
+			return dev_err_probe(&pdev->dev, PTR_ERR(scodec->rst),
+					     "Failed to get reset control\n");
 	}
 
 	scodec->gpio_pa = devm_gpiod_get_optional(&pdev->dev, "allwinner,pa",
 						  GPIOD_OUT_LOW);
-	if (IS_ERR(scodec->gpio_pa)) {
-		ret = PTR_ERR(scodec->gpio_pa);
-		dev_err_probe(&pdev->dev, ret, "Failed to get pa gpio\n");
-		return ret;
-	}
+	if (IS_ERR(scodec->gpio_pa))
+		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->gpio_pa),
+				     "Failed to get pa gpio\n");
+
+
+	scodec->gpio_hp = devm_gpiod_get_optional(&pdev->dev, "hp-det", GPIOD_IN);
+	if (IS_ERR(scodec->gpio_hp))
+		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->gpio_hp),
+				     "Failed to get hp-det gpio\n");
 
 	/* reg_field setup */
 	scodec->reg_adc_fifoc = devm_regmap_field_alloc(&pdev->dev,
 							scodec->regmap,
 							quirks->reg_adc_fifoc);
-	if (IS_ERR(scodec->reg_adc_fifoc)) {
-		ret = PTR_ERR(scodec->reg_adc_fifoc);
-		dev_err(&pdev->dev, "Failed to create regmap fields: %d\n",
-			ret);
-		return ret;
-	}
+	if (IS_ERR(scodec->reg_adc_fifoc))
+		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->reg_adc_fifoc),
+				     "Failed to create regmap fields\n");
 
 	scodec->reg_dac_fifoc = devm_regmap_field_alloc(&pdev->dev,
 							scodec->regmap,
 							quirks->reg_dac_fifoc);
-	if (IS_ERR(scodec->reg_dac_fifoc)) {
-		ret = PTR_ERR(scodec->reg_dac_fifoc);
-		dev_err(&pdev->dev, "Failed to create regmap fields: %d\n",
-			ret);
-		return ret;
-	}
+	if (IS_ERR(scodec->reg_dac_fifoc))
+		return dev_err_probe(&pdev->dev, PTR_ERR(scodec->reg_dac_fifoc),
+				     "Failed to create regmap fields\n");
 
 	/* DMA configuration for TX FIFO */
 	scodec->playback_dma_data.addr = res->start + quirks->reg_dac_txdata;
@@ -2337,39 +2381,29 @@ static int sun4i_codec_probe(struct platform_device *pdev)
 
 	ret = devm_snd_soc_register_component(&pdev->dev, quirks->codec,
 				     &sun4i_codec_dai, 1);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to register our codec\n");
+	if (ret)
 		return ret;
-	}
 
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					      &sun4i_codec_component,
 					      &dummy_cpu_dai, 1);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to register our DAI\n");
+	if (ret)
 		return ret;
-	}
 
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to register against DMAEngine\n");
+	if (ret)
 		return ret;
-	}
 
 	card = quirks->create_card(&pdev->dev);
-	if (IS_ERR(card)) {
-		ret = PTR_ERR(card);
-		dev_err(&pdev->dev, "Failed to create our card\n");
-		return ret;
-	}
+	if (IS_ERR(card))
+		return PTR_ERR(card);
 
 	snd_soc_card_set_drvdata(card, scodec);
 
 	ret = snd_soc_register_card(card);
-	if (ret) {
-		dev_err_probe(&pdev->dev, ret, "Failed to register our card\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Failed to register our card\n");
 
 	return 0;
 }

@@ -422,7 +422,7 @@ static int redrat3_send_cmd(int cmd, struct redrat3_dev *rr3)
 static int redrat3_enable_detector(struct redrat3_dev *rr3)
 {
 	struct device *dev = rr3->dev;
-	u8 ret;
+	int ret;
 
 	ret = redrat3_send_cmd(RR3_RC_DET_ENABLE, rr3);
 	if (ret != 0)
@@ -502,7 +502,7 @@ static int redrat3_set_timeout(struct rc_dev *rc_dev, unsigned int timeoutus)
 	__be32 *timeout;
 	int ret;
 
-	timeout = kmalloc(sizeof(*timeout), GFP_KERNEL);
+	timeout = kmalloc_obj(*timeout);
 	if (!timeout)
 		return -ENOMEM;
 
@@ -768,13 +768,11 @@ static int redrat3_transmit_ir(struct rc_dev *rcdev, unsigned *txbuf,
 	/* rr3 will disable rc detector on transmit */
 	rr3->transmitting = true;
 
-	sample_lens = kcalloc(RR3_DRIVER_MAXLENS,
-			      sizeof(*sample_lens),
-			      GFP_KERNEL);
+	sample_lens = kzalloc_objs(*sample_lens, RR3_DRIVER_MAXLENS);
 	if (!sample_lens)
 		return -ENOMEM;
 
-	irdata = kzalloc(sizeof(*irdata), GFP_KERNEL);
+	irdata = kzalloc_obj(*irdata);
 	if (!irdata) {
 		ret = -ENOMEM;
 		goto out;
@@ -977,6 +975,7 @@ static int redrat3_dev_probe(struct usb_interface *intf,
 	struct device *dev = &intf->dev;
 	struct usb_host_interface *uhi;
 	struct redrat3_dev *rr3;
+	struct rc_dev *rc;
 	struct usb_endpoint_descriptor *ep;
 	struct usb_endpoint_descriptor *ep_narrow = NULL;
 	struct usb_endpoint_descriptor *ep_wide = NULL;
@@ -1022,7 +1021,7 @@ static int redrat3_dev_probe(struct usb_interface *intf,
 	}
 
 	/* allocate memory for our device state and initialize it */
-	rr3 = kzalloc(sizeof(*rr3), GFP_KERNEL);
+	rr3 = kzalloc_obj(*rr3);
 	if (!rr3)
 		goto no_endpoints;
 
@@ -1121,9 +1120,12 @@ static int redrat3_dev_probe(struct usb_interface *intf,
 	return 0;
 
 led_free:
+	rc_unregister_device(rr3->rc);
 	led_classdev_unregister(&rr3->led);
 redrat_free:
+	rc = rr3->rc;
 	redrat3_delete(rr3, rr3->udev);
+	rc_free_device(rc);
 
 no_endpoints:
 	return retval;
@@ -1133,11 +1135,13 @@ static void redrat3_dev_disconnect(struct usb_interface *intf)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct redrat3_dev *rr3 = usb_get_intfdata(intf);
+	struct rc_dev *rc = rr3->rc;
 
 	usb_set_intfdata(intf, NULL);
-	rc_unregister_device(rr3->rc);
+	rc_unregister_device(rc);
 	led_classdev_unregister(&rr3->led);
 	redrat3_delete(rr3, udev);
+	rc_free_device(rc);
 }
 
 static int redrat3_dev_suspend(struct usb_interface *intf, pm_message_t message)

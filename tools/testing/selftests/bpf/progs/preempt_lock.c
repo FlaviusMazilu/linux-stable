@@ -115,6 +115,58 @@ int preempt_sleepable_helper(void *ctx)
 	return 0;
 }
 
+SEC("?uprobe.s")
+__failure __msg("sleepable helper bpf_get_stack#")
+int preempt_sleepable_get_stack(struct pt_regs *ctx)
+{
+	struct bpf_stack_build_id stack;
+
+	bpf_preempt_disable();
+	bpf_get_stack(ctx, &stack, sizeof(stack),
+		      BPF_F_USER_STACK | BPF_F_USER_BUILD_ID);
+	bpf_preempt_enable();
+	return 0;
+}
+
+SEC("?uprobe.s")
+__failure __msg("sleepable helper bpf_get_task_stack#")
+int preempt_sleepable_get_task_stack(void *ctx)
+{
+	struct bpf_stack_build_id stack;
+	struct task_struct *task;
+
+	task = bpf_get_current_task_btf();
+	bpf_preempt_disable();
+	bpf_get_task_stack(task, &stack, sizeof(stack),
+			   BPF_F_USER_STACK | BPF_F_USER_BUILD_ID);
+	bpf_preempt_enable();
+	return 0;
+}
+
+SEC("?uprobe.s")
+__success
+int sleepable_get_stack(struct pt_regs *ctx)
+{
+	struct bpf_stack_build_id stack;
+
+	bpf_get_stack(ctx, &stack, sizeof(stack),
+		      BPF_F_USER_STACK | BPF_F_USER_BUILD_ID);
+	return 0;
+}
+
+SEC("?uprobe.s")
+__success
+int sleepable_get_task_stack(void *ctx)
+{
+	struct bpf_stack_build_id stack;
+	struct task_struct *task;
+
+	task = bpf_get_current_task_btf();
+	bpf_get_task_stack(task, &stack, sizeof(stack),
+			   BPF_F_USER_STACK | BPF_F_USER_BUILD_ID);
+	return 0;
+}
+
 SEC("?fentry.s/" SYS_PREFIX "sys_getpgid")
 __failure __msg("kernel func bpf_copy_from_user_str is sleepable within non-preemptible region")
 int preempt_sleepable_kfunc(void *ctx)
@@ -134,11 +186,77 @@ int __noinline preempt_global_subprog(void)
 }
 
 SEC("?tc")
-__failure __msg("global function calls are not allowed with preemption disabled")
+__success
 int preempt_global_subprog_test(struct __sk_buff *ctx)
 {
 	preempt_disable();
 	preempt_global_subprog();
+	preempt_enable();
+	return 0;
+}
+
+int __noinline
+global_subprog(int i)
+{
+	if (i)
+		bpf_printk("%p", &i);
+	return i;
+}
+
+int __noinline
+global_sleepable_helper_subprog(int i)
+{
+	if (i)
+		bpf_copy_from_user(&i, sizeof(i), NULL);
+	return i;
+}
+
+int __noinline
+global_sleepable_kfunc_subprog(int i)
+{
+	if (i)
+		bpf_copy_from_user_str(&i, sizeof(i), NULL, 0);
+	global_subprog(i);
+	return i;
+}
+
+int __noinline
+global_subprog_calling_sleepable_global(int i)
+{
+	if (!i)
+		global_sleepable_kfunc_subprog(i);
+	return i;
+}
+
+SEC("?syscall")
+__failure __msg("sleepable global function")
+int preempt_global_sleepable_helper_subprog(struct __sk_buff *ctx)
+{
+	preempt_disable();
+	if (ctx->mark)
+		global_sleepable_helper_subprog(ctx->mark);
+	preempt_enable();
+	return 0;
+}
+
+SEC("?syscall")
+__failure __msg("sleepable global function")
+int preempt_global_sleepable_kfunc_subprog(struct __sk_buff *ctx)
+{
+	preempt_disable();
+	if (ctx->mark)
+		global_sleepable_kfunc_subprog(ctx->mark);
+	preempt_enable();
+	return 0;
+}
+
+SEC("?syscall")
+__failure __msg("sleepable global function")
+int preempt_global_sleepable_subprog_indirect(struct __sk_buff *ctx)
+{
+	preempt_disable();
+	if (ctx->mark)
+		global_subprog_calling_sleepable_global(ctx->mark);
 	preempt_enable();
 	return 0;
 }

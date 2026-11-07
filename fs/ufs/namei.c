@@ -70,8 +70,7 @@ static struct dentry *ufs_lookup(struct inode * dir, struct dentry *dentry, unsi
  * with d_instantiate(). 
  */
 static int ufs_create (struct mnt_idmap * idmap,
-		struct inode * dir, struct dentry * dentry, umode_t mode,
-		bool excl)
+		struct inode * dir, struct dentry * dentry, umode_t mode)
 {
 	struct inode *inode;
 
@@ -166,15 +165,15 @@ static int ufs_link (struct dentry * old_dentry, struct inode * dir,
 	return error;
 }
 
-static int ufs_mkdir(struct mnt_idmap * idmap, struct inode * dir,
-	struct dentry * dentry, umode_t mode)
+static struct dentry *ufs_mkdir(struct mnt_idmap * idmap, struct inode * dir,
+				struct dentry * dentry, umode_t mode)
 {
 	struct inode * inode;
 	int err;
 
 	inode_inc_link_count(dir);
 
-	inode = ufs_new_inode(dir, S_IFDIR|mode);
+	inode = ufs_new_inode(dir, mode);
 	err = PTR_ERR(inode);
 	if (IS_ERR(inode))
 		goto out_dir;
@@ -194,7 +193,7 @@ static int ufs_mkdir(struct mnt_idmap * idmap, struct inode * dir,
 		goto out_fail;
 
 	d_instantiate_new(dentry, inode);
-	return 0;
+	return NULL;
 
 out_fail:
 	inode_dec_link_count(inode);
@@ -202,7 +201,7 @@ out_fail:
 	discard_new_inode(inode);
 out_dir:
 	inode_dec_link_count(dir);
-	return err;
+	return ERR_PTR(err);
 }
 
 static int ufs_unlink(struct inode *dir, struct dentry *dentry)

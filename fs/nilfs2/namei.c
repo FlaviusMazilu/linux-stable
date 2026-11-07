@@ -54,7 +54,7 @@ static struct dentry *
 nilfs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
 	struct inode *inode;
-	ino_t ino;
+	u64 ino;
 	int res;
 
 	if (dentry->d_name.len > NILFS_NAME_LEN)
@@ -69,7 +69,7 @@ nilfs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 		inode = nilfs_iget(dir->i_sb, NILFS_I(dir)->i_root, ino);
 		if (inode == ERR_PTR(-ESTALE)) {
 			nilfs_error(dir->i_sb,
-					"deleted inode referenced: %lu", ino);
+				"deleted inode referenced: %llu", ino);
 			return ERR_PTR(-EIO);
 		}
 	}
@@ -86,7 +86,7 @@ nilfs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
  * with d_instantiate().
  */
 static int nilfs_create(struct mnt_idmap *idmap, struct inode *dir,
-			struct dentry *dentry, umode_t mode, bool excl)
+			struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode;
 	struct nilfs_transaction_info ti;
@@ -218,8 +218,8 @@ static int nilfs_link(struct dentry *old_dentry, struct inode *dir,
 	return err;
 }
 
-static int nilfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *dentry, umode_t mode)
+static struct dentry *nilfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				  struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode;
 	struct nilfs_transaction_info ti;
@@ -227,11 +227,11 @@ static int nilfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 
 	err = nilfs_transaction_begin(dir->i_sb, &ti, 1);
 	if (err)
-		return err;
+		return ERR_PTR(err);
 
 	inc_nlink(dir);
 
-	inode = nilfs_new_inode(dir, S_IFDIR | mode);
+	inode = nilfs_new_inode(dir, mode);
 	err = PTR_ERR(inode);
 	if (IS_ERR(inode))
 		goto out_dir;
@@ -258,7 +258,7 @@ out:
 	else
 		nilfs_transaction_abort(dir->i_sb);
 
-	return err;
+	return err ? ERR_PTR(err) : NULL;
 
 out_fail:
 	drop_nlink(inode);
@@ -292,7 +292,7 @@ static int nilfs_do_unlink(struct inode *dir, struct dentry *dentry)
 
 	if (!inode->i_nlink) {
 		nilfs_warn(inode->i_sb,
-			   "deleting nonexistent file (ino=%lu), %d",
+			   "deleting nonexistent file (ino=%llu), %d",
 			   inode->i_ino, inode->i_nlink);
 		set_nlink(inode, 1);
 	}
@@ -463,7 +463,7 @@ out:
  */
 static struct dentry *nilfs_get_parent(struct dentry *child)
 {
-	ino_t ino;
+	u64 ino;
 	int res;
 	struct nilfs_root *root;
 

@@ -3,7 +3,7 @@
  * Copyright (C) 2018-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -43,6 +43,7 @@
 #include "xfs_rtalloc.h"
 #include "xfs_metafile.h"
 #include "xfs_rtrefcount_btree.h"
+#include "xfs_zone_alloc.h"
 #include "scrub/scrub.h"
 #include "scrub/common.h"
 #include "scrub/trace.h"
@@ -398,6 +399,7 @@ xrep_calc_rtgroup_resblks(
 	struct xfs_mount		*mp = sc->mp;
 	struct xfs_scrub_metadata	*sm = sc->sm;
 	uint64_t			usedlen;
+	xfs_extlen_t			refcbt_sz = 0;
 	xfs_extlen_t			rmapbt_sz = 0;
 
 	if (!(sm->sm_flags & XFS_SCRUB_IFLAG_REPAIR))
@@ -410,13 +412,27 @@ xrep_calc_rtgroup_resblks(
 	usedlen = xfs_rtbxlen_to_blen(mp, xfs_rtgroup_extents(mp, sm->sm_agno));
 	ASSERT(usedlen <= XFS_MAX_RGBLOCKS);
 
+	if (xfs_has_reflink(mp))
+		refcbt_sz = xfs_rtrefcountbt_calc_size(mp, usedlen);
+
 	if (xfs_has_rmapbt(mp))
 		rmapbt_sz = xfs_rtrmapbt_calc_size(mp, usedlen);
 
-	trace_xrep_calc_rtgroup_resblks_btsize(mp, sm->sm_agno, usedlen,
-			rmapbt_sz);
+	/*
+	 * Guess how many blocks we need to rebuild the rmapbt.  For
+	 * non-reflink filesystems we can't have more records than used blocks.
+	 * However, with reflink it's possible to have more than one rmap
+	 * record per rtgroup block.  We don't know how many rmaps there could
+	 * be in the rtgroup, so we start off with what we hope is an generous
+	 * over-estimation.
+	 */
+	if (refcbt_sz > 0 && rmapbt_sz > 0)
+		rmapbt_sz *= 2;
 
-	return rmapbt_sz;
+	trace_xrep_calc_rtgroup_resblks_btsize(mp, sm->sm_agno, usedlen,
+			rmapbt_sz, refcbt_sz);
+
+	return max(rmapbt_sz, refcbt_sz);
 }
 #endif /* CONFIG_XFS_RT */
 
@@ -815,7 +831,7 @@ xrep_ino_dqattach(
 	case -ENOENT:
 		xfs_err_ratelimited(sc->mp,
 "inode %llu repair encountered quota error %d, quotacheck forced.",
-				(unsigned long long)sc->ip->i_ino, error);
+				(unsigned long long)I_INO(sc->ip), error);
 		if (XFS_IS_UQUOTA_ON(sc->mp) && !sc->ip->i_udquot)
 			xrep_force_quotacheck(sc, XFS_DQTYPE_USER);
 		if (XFS_IS_GQUOTA_ON(sc->mp) && !sc->ip->i_gdquot)
@@ -1050,7 +1066,13 @@ xrep_require_rtext_inuse(
 	xfs_rtxnum_t		startrtx;
 	xfs_rtxnum_t		endrtx;
 	bool			is_free = false;
-	int			error;
+	int			error = 0;
+
+	if (xfs_has_zoned(mp)) {
+		if (!xfs_zone_rgbno_is_valid(sc->sr.rtg, rgbno + len - 1))
+			return -EFSCORRUPTED;
+		return 0;
+	}
 
 	startrtx = xfs_rgbno_to_rtx(mp, rgbno);
 	endrtx = xfs_rgbno_to_rtx(mp, rgbno + len - 1);
@@ -1103,7 +1125,7 @@ xrep_will_attempt(
 		return true;
 
 	/* Let debug users force us into the repair routines. */
-	if (XFS_TEST_ERROR(false, sc->mp, XFS_ERRTAG_FORCE_SCRUB_REPAIR))
+	if (XFS_TEST_ERROR(sc->mp, XFS_ERRTAG_FORCE_SCRUB_REPAIR))
 		return true;
 
 	/* Metadata is corrupt or failed cross-referencing. */
@@ -1129,6 +1151,9 @@ xrep_metadata_inode_subtype(
 	 * setup/teardown routines.
 	 */
 	sub = xchk_scrub_create_subord(sc, scrub_type);
+	if (!sub)
+		return -ENOMEM;
+
 	error = sub->sc.ops->scrub(&sub->sc);
 	if (error)
 		goto out;
@@ -1262,42 +1287,6 @@ xrep_setup_xfbtree(
 }
 
 /*
- * Create a dummy transaction for use in a live update hook function.  This
- * function MUST NOT be called from regular repair code because the current
- * process' transaction is saved via the cookie.
- */
-int
-xrep_trans_alloc_hook_dummy(
-	struct xfs_mount	*mp,
-	void			**cookiep,
-	struct xfs_trans	**tpp)
-{
-	int			error;
-
-	*cookiep = current->journal_info;
-	current->journal_info = NULL;
-
-	error = xfs_trans_alloc_empty(mp, tpp);
-	if (!error)
-		return 0;
-
-	current->journal_info = *cookiep;
-	*cookiep = NULL;
-	return error;
-}
-
-/* Cancel a dummy transaction used by a live update hook function. */
-void
-xrep_trans_cancel_hook_dummy(
-	void			**cookiep,
-	struct xfs_trans	*tp)
-{
-	xfs_trans_cancel(tp);
-	current->journal_info = *cookiep;
-	*cookiep = NULL;
-}
-
-/*
  * See if this buffer can pass the given ->verify_struct() function.
  *
  * If the buffer already has ops attached and they're not the ones that were
@@ -1386,13 +1375,16 @@ int
 xrep_reset_metafile_resv(
 	struct xfs_scrub	*sc)
 {
-	struct xfs_inode	*ip = sc->ip;
+	struct xfs_mount	*mp = sc->mp;
 	int64_t			delta;
-	int			error;
+	int			error = 0;
 
-	delta = ip->i_nblocks + ip->i_delayed_blks - ip->i_meta_resv_asked;
+	mutex_lock(&mp->m_metafile_resv_lock);
+
+	delta = mp->m_metafile_resv_used + mp->m_metafile_resv_avail -
+		mp->m_metafile_resv_target;
 	if (delta == 0)
-		return 0;
+		goto out_resv_lock;
 
 	/*
 	 * Too many blocks have been reserved, transfer some from the incore
@@ -1401,36 +1393,39 @@ xrep_reset_metafile_resv(
 	if (delta > 0) {
 		int64_t		give_back;
 
-		give_back = min_t(uint64_t, delta, ip->i_delayed_blks);
+		give_back = min_t(uint64_t, delta, mp->m_metafile_resv_avail);
 		if (give_back > 0) {
-			xfs_mod_delalloc(ip, 0, -give_back);
-			xfs_add_fdblocks(ip->i_mount, give_back);
-			ip->i_delayed_blks -= give_back;
+			xfs_mod_sb_delalloc(mp, -give_back);
+			xfs_add_fdblocks(mp, give_back);
+			mp->m_metafile_resv_avail -= give_back;
 		}
 
-		return 0;
+		goto out_resv_lock;
 	}
 
 	/*
 	 * Not enough reservation; try to take some blocks from the filesystem
-	 * to the metadata inode.  @delta is negative here, so invert the sign.
+	 * to the metabtree reservation.
 	 */
-	delta = -delta;
-	error = xfs_dec_fdblocks(sc->mp, delta, true);
+	delta = -delta; /* delta is negative here, so invert the sign. */
+	error = xfs_dec_fdblocks(mp, delta, true);
 	while (error == -ENOSPC) {
 		delta--;
 		if (delta == 0) {
 			xfs_warn(sc->mp,
-"Insufficient free space to reset space reservation for inode 0x%llx after repair.",
-					ip->i_ino);
-			return 0;
+"Insufficient free space to reset metabtree reservation after repair.");
+			error = 0;
+			goto out_resv_lock;
 		}
-		error = xfs_dec_fdblocks(sc->mp, delta, true);
+		error = xfs_dec_fdblocks(mp, delta, true);
 	}
 	if (error)
-		return error;
+		goto out_resv_lock;
 
-	xfs_mod_delalloc(ip, 0, delta);
-	ip->i_delayed_blks += delta;
-	return 0;
+	xfs_mod_sb_delalloc(mp, delta);
+	mp->m_metafile_resv_avail += delta;
+
+out_resv_lock:
+	mutex_unlock(&mp->m_metafile_resv_lock);
+	return error;
 }

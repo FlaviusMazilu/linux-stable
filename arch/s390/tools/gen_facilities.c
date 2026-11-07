@@ -29,6 +29,7 @@ static struct facility_def facility_defs[] = {
 		.bits = (int[]){
 			0,  /* N3 instructions */
 			1,  /* z/Arch mode installed */
+			3,  /* dat-enhancement 1 */
 			18, /* long displacement facility */
 			21, /* extended-immediate facility */
 			25, /* store clock fast */
@@ -53,6 +54,9 @@ static struct facility_def facility_defs[] = {
 #endif
 #ifdef CONFIG_HAVE_MARCH_Z15_FEATURES
 			61, /* miscellaneous-instruction-extension 3 */
+#endif
+#ifdef CONFIG_HAVE_MARCH_Z17_FEATURES
+			84, /* miscellaneous-instruction-extension 4 */
 #endif
 			-1 /* END */
 		}
@@ -92,6 +96,13 @@ static struct facility_def facility_defs[] = {
 			150, /* enhanced sort */
 			151, /* deflate conversion */
 			155, /* msa extension 9 */
+			165, /* nnpa facility */
+			170, /* ineffective-nonconstrained-transaction facility */
+			193, /* bear enhancement facility */
+			194, /* rdp enhancement facility */
+			196, /* processor activity instrumentation facility */
+			197, /* processor activity instrumentation extension 1 */
+			201, /* concurrent-functions facility */
 			-1  /* END */
 		}
 	},
@@ -108,13 +119,6 @@ static struct facility_def facility_defs[] = {
 			12, /* AP Query Configuration Information */
 			15, /* AP Facilities Test */
 			156, /* etoken facility */
-			165, /* nnpa facility */
-			170, /* ineffective-nonconstrained-transaction facility */
-			193, /* bear enhancement facility */
-			194, /* rdp enhancement facility */
-			196, /* processor activity instrumentation facility */
-			197, /* processor activity instrumentation extension 1 */
-			201, /* concurrent-functions facility */
 			-1  /* END */
 		}
 	},

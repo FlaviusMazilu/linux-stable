@@ -17,14 +17,43 @@ SYM_FUNC_START(__asm_copy_to_user)
 	ALTERNATIVE("j fallback_scalar_usercopy", "nop", 0, RISCV_ISA_EXT_ZVE32X, CONFIG_RISCV_ISA_V)
 	REG_L	t0, riscv_v_usercopy_threshold
 	bltu	a2, t0, fallback_scalar_usercopy
-	tail enter_vector_usercopy
+	li	a3, 1
+	tail 	enter_vector_usercopy
 #endif
+SYM_FUNC_END(__asm_copy_to_user)
+EXPORT_SYMBOL(__asm_copy_to_user)
+SYM_FUNC_ALIAS(__asm_copy_from_user, __asm_copy_to_user)
+EXPORT_SYMBOL(__asm_copy_from_user)
+
 SYM_FUNC_START(fallback_scalar_usercopy)
-
 	/* Enable access to user memory */
-	li t6, SR_SUM
-	csrs CSR_STATUS, t6
+	li	t6, SR_SUM
+	csrs 	CSR_STATUS, t6
+	mv 	t6, ra
 
+	call 	fallback_scalar_usercopy_sum_enabled
+
+	/* Disable access to user memory */
+	mv 	ra, t6
+	li 	t6, SR_SUM
+	csrc 	CSR_STATUS, t6
+	ret
+SYM_FUNC_END(fallback_scalar_usercopy)
+
+SYM_FUNC_START(__asm_copy_to_user_sum_enabled)
+#ifdef CONFIG_RISCV_ISA_V
+	ALTERNATIVE("j fallback_scalar_usercopy_sum_enabled", "nop", 0, RISCV_ISA_EXT_ZVE32X, CONFIG_RISCV_ISA_V)
+	REG_L	t0, riscv_v_usercopy_threshold
+	bltu	a2, t0, fallback_scalar_usercopy_sum_enabled
+	li	a3, 0
+	tail 	enter_vector_usercopy
+#endif
+SYM_FUNC_END(__asm_copy_to_user_sum_enabled)
+SYM_FUNC_ALIAS(__asm_copy_from_user_sum_enabled, __asm_copy_to_user_sum_enabled)
+EXPORT_SYMBOL(__asm_copy_from_user_sum_enabled)
+EXPORT_SYMBOL(__asm_copy_to_user_sum_enabled)
+
+SYM_FUNC_START(fallback_scalar_usercopy_sum_enabled)
 	/*
 	 * Save the terminal address which will be used to compute the number
 	 * of bytes copied in case of a fixup exception.
@@ -47,6 +76,7 @@ SYM_FUNC_START(fallback_scalar_usercopy)
 	li	a3, 9*SZREG-1 /* size must >= (word_copy stride + SZREG-1) */
 	bltu	a2, a3, .Lbyte_copy_tail
 
+#if !defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)
 	/*
 	 * Copy first bytes until dst is aligned to word boundary.
 	 * a0 - start of dst
@@ -74,7 +104,7 @@ SYM_FUNC_START(fallback_scalar_usercopy)
 	/* a1 - start of src */
 	andi	a3, a1, SZREG-1
 	bnez	a3, .Lshift_copy
-
+#endif
 .Lword_copy:
         /*
 	 * Both src and dst are aligned, unrolled word copy
@@ -108,6 +138,7 @@ SYM_FUNC_START(fallback_scalar_usercopy)
 	addi	t0, t0, 8*SZREG /* revert to original value */
 	j	.Lbyte_copy_tail
 
+#if !defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)
 .Lshift_copy:
 
 	/*
@@ -160,6 +191,7 @@ SYM_FUNC_START(fallback_scalar_usercopy)
 
 	/* Revert src to original unaligned value  */
 	add	a1, a1, a3
+#endif
 
 .Lbyte_copy_tail:
 	/*
@@ -178,23 +210,12 @@ SYM_FUNC_START(fallback_scalar_usercopy)
 	bltu	a0, t0, 4b	/* t0 - end of dst */
 
 .Lout_copy_user:
-	/* Disable access to user memory */
-	csrc CSR_STATUS, t6
 	li	a0, 0
 	ret
-
-	/* Exception fixup code */
 10:
-	/* Disable access to user memory */
-	csrc CSR_STATUS, t6
 	sub a0, t5, a0
 	ret
-SYM_FUNC_END(__asm_copy_to_user)
-SYM_FUNC_END(fallback_scalar_usercopy)
-EXPORT_SYMBOL(__asm_copy_to_user)
-SYM_FUNC_ALIAS(__asm_copy_from_user, __asm_copy_to_user)
-EXPORT_SYMBOL(__asm_copy_from_user)
-
+SYM_FUNC_END(fallback_scalar_usercopy_sum_enabled)
 
 SYM_FUNC_START(__clear_user)
 

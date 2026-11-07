@@ -60,7 +60,7 @@ struct i915_power_well_instance {
 	/* unique identifier for this power well */
 	enum i915_power_well_id id;
 	/*
-	 * Arbitraty data associated with this power well. Platform and power
+	 * Arbitrary data associated with this power well. Platform and power
 	 * well specific.
 	 */
 	union {
@@ -77,7 +77,7 @@ struct i915_power_well_instance {
 		struct {
 			/*
 			 * request/status flag index in the power well
-			 * constrol/status registers.
+			 * control/status registers.
 			 */
 			u8 idx;
 		} hsw;
@@ -103,8 +103,6 @@ struct i915_power_well_desc {
 	 * the well enabled.
 	 */
 	u16 fixed_enable_delay:1;
-	/* The pw is backing the VGA functionality */
-	u16 has_vga:1;
 	u16 has_fuses:1;
 	/*
 	 * The pw is for an ICL+ TypeC PHY port in
@@ -161,6 +159,7 @@ void gen9_set_dc_state(struct intel_display *display, u32 state);
 void gen9_disable_dc_states(struct intel_display *display);
 void bxt_enable_dc9(struct intel_display *display);
 void bxt_disable_dc9(struct intel_display *display);
+void xe3lpd_enable_dc_count(struct intel_display *display);
 
 extern const struct i915_power_well_ops i9xx_always_on_power_well_ops;
 extern const struct i915_power_well_ops chv_pipe_power_well_ops;

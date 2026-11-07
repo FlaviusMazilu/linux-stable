@@ -153,25 +153,17 @@ static int phy_syscon_pll_refclk(struct dwc3_am62 *am62)
 {
 	struct device *dev = am62->dev;
 	struct device_node *node = dev->of_node;
-	struct of_phandle_args args;
 	struct regmap *syscon;
 	int ret;
 
-	syscon = syscon_regmap_lookup_by_phandle(node, "ti,syscon-phy-pll-refclk");
+	syscon = syscon_regmap_lookup_by_phandle_args(node, "ti,syscon-phy-pll-refclk",
+						      1, &am62->offset);
 	if (IS_ERR(syscon)) {
 		dev_err(dev, "unable to get ti,syscon-phy-pll-refclk regmap\n");
 		return PTR_ERR(syscon);
 	}
 
 	am62->syscon = syscon;
-
-	ret = of_parse_phandle_with_fixed_args(node, "ti,syscon-phy-pll-refclk", 1,
-					       0, &args);
-	if (ret)
-		return ret;
-
-	of_node_put(args.np);
-	am62->offset = args.args[0];
 
 	/* Core voltage. PHY_CORE_VOLTAGE bit Recommended to be 0 always */
 	ret = regmap_update_bits(am62->syscon, am62->offset, PHY_CORE_VOLTAGE_MASK, 0);
@@ -213,7 +205,9 @@ static int dwc3_ti_init(struct dwc3_am62 *am62)
 
 	dwc3_ti_writel(am62, USBSS_PHY_CONFIG, reg);
 
-	clk_prepare_enable(am62->usb2_refclk);
+	ret = clk_prepare_enable(am62->usb2_refclk);
+	if (ret)
+		return ret;
 
 	/* Set mode valid bit to indicate role is valid */
 	reg = dwc3_ti_readl(am62, USBSS_MODE_CONTROL);
@@ -300,12 +294,12 @@ static int dwc3_ti_probe(struct platform_device *pdev)
 	/* Setting up autosuspend */
 	pm_runtime_set_autosuspend_delay(dev, DWC3_AM62_AUTOSUSPEND_DELAY);
 	pm_runtime_use_autosuspend(dev);
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 	return 0;
 
 err_pm_disable:
 	clk_disable_unprepare(am62->usb2_refclk);
+	pm_runtime_put_noidle(dev);
 	pm_runtime_disable(dev);
 	pm_runtime_set_suspended(dev);
 	return ret;
@@ -370,14 +364,19 @@ static int dwc3_ti_resume_common(struct device *dev)
 {
 	struct dwc3_am62 *am62 = dev_get_drvdata(dev);
 	u32 reg;
+	int ret;
 
 	reg = dwc3_ti_readl(am62, USBSS_DEBUG_CFG);
 	if (reg != USBSS_DEBUG_CFG_DISABLED) {
 		/* lost power/context */
-		dwc3_ti_init(am62);
+		ret = dwc3_ti_init(am62);
+		if (ret)
+			return ret;
 	} else {
 		dwc3_ti_writel(am62, USBSS_DEBUG_CFG, USBSS_DEBUG_CFG_OFF);
-		clk_prepare_enable(am62->usb2_refclk);
+		ret = clk_prepare_enable(am62->usb2_refclk);
+		if (ret)
+			return ret;
 	}
 
 	if (device_may_wakeup(dev)) {

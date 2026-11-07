@@ -22,21 +22,17 @@
 #include <linux/atomic.h>
 #include <asm/seccomp.h>
 
+extern bool __seccomp_permit_syscall(void);
+
 #ifdef CONFIG_HAVE_ARCH_SECCOMP_FILTER
-extern int __secure_computing(const struct seccomp_data *sd);
-static inline int secure_computing(void)
+static __always_inline bool seccomp_permit_syscall(void)
 {
 	if (unlikely(test_syscall_work(SECCOMP)))
-		return  __secure_computing(NULL);
-	return 0;
+		return  __seccomp_permit_syscall();
+	return true;
 }
 #else
 extern void secure_computing_strict(int this_syscall);
-static inline int __secure_computing(const struct seccomp_data *sd)
-{
-	secure_computing_strict(sd->nr);
-	return 0;
-}
 #endif
 
 extern long prctl_get_seccomp(void);
@@ -54,11 +50,11 @@ static inline int seccomp_mode(struct seccomp *s)
 struct seccomp_data;
 
 #ifdef CONFIG_HAVE_ARCH_SECCOMP_FILTER
-static inline int secure_computing(void) { return 0; }
+static inline bool seccomp_permit_syscall(void) { return true; }
 #else
 static inline void secure_computing_strict(int this_syscall) { return; }
 #endif
-static inline int __secure_computing(const struct seccomp_data *sd) { return 0; }
+static inline bool __seccomp_permit_syscall(void) { return true; }
 
 static inline long prctl_get_seccomp(void)
 {

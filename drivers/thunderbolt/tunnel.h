@@ -37,7 +37,6 @@ enum tb_tunnel_state {
  * @src_port: Source port of the tunnel
  * @dst_port: Destination port of the tunnel. For discovered incomplete
  *	      tunnels may be %NULL or null adapter port instead.
- * @paths: All paths required by the tunnel
  * @npaths: Number of paths in @paths
  * @pre_activate: Optional tunnel specific initialization called before
  *		  activation. Can touch hardware.
@@ -63,18 +62,19 @@ enum tb_tunnel_state {
  * @allocated_down: Allocated downstream bandwidth (only for USB3)
  * @bw_mode: DP bandwidth allocation mode registers can be used to
  *	     determine consumed and allocated bandwidth
+ * @dprx_started: DPRX negotiation was started (tb_dp_dprx_start() was called for it)
  * @dprx_canceled: Was DPRX capabilities read poll canceled
  * @dprx_timeout: If set DPRX capabilities read poll work will timeout after this passes
  * @dprx_work: Worker that is scheduled to poll completion of DPRX capabilities read
- * @callback: Optional callback called when DP tunnel is fully activated
- * @callback_data: Optional data for @callback
+ * @callback: Callback called when DP tunnel is fully activated
+ * @callback_data: Data for @callback
+ * @paths: All paths required by the tunnel
  */
 struct tb_tunnel {
 	struct kref kref;
 	struct tb *tb;
 	struct tb_port *src_port;
 	struct tb_port *dst_port;
-	struct tb_path **paths;
 	size_t npaths;
 	int (*pre_activate)(struct tb_tunnel *tunnel);
 	int (*activate)(struct tb_tunnel *tunnel, bool activate);
@@ -100,11 +100,14 @@ struct tb_tunnel {
 	int allocated_up;
 	int allocated_down;
 	bool bw_mode;
+	bool dprx_started;
 	bool dprx_canceled;
 	ktime_t dprx_timeout;
 	struct delayed_work dprx_work;
 	void (*callback)(struct tb_tunnel *tunnel, void *data);
 	void *callback_data;
+
+	struct tb_path *paths[] __counted_by(npaths);
 };
 
 struct tb_tunnel *tb_tunnel_discover_pci(struct tb *tb, struct tb_port *down,
@@ -114,7 +117,9 @@ struct tb_tunnel *tb_tunnel_alloc_pci(struct tb *tb, struct tb_port *up,
 bool tb_tunnel_reserved_pci(struct tb_port *port, int *reserved_up,
 			    int *reserved_down);
 struct tb_tunnel *tb_tunnel_discover_dp(struct tb *tb, struct tb_port *in,
-					bool alloc_hopid);
+					bool alloc_hopid,
+					void (*callback)(struct tb_tunnel *, void *),
+					void *callback_data);
 struct tb_tunnel *tb_tunnel_alloc_dp(struct tb *tb, struct tb_port *in,
 				     struct tb_port *out, int link_nr,
 				     int max_up, int max_down,
@@ -140,10 +145,11 @@ void tb_tunnel_deactivate(struct tb_tunnel *tunnel);
  * tb_tunnel_is_active() - Is tunnel fully activated
  * @tunnel: Tunnel to check
  *
- * Returns %true if @tunnel is fully activated. For other than DP
- * tunnels this is pretty much once tb_tunnel_activate() returns
- * successfully. However, for DP tunnels this returns %true only once the
- * DPRX capabilities read has been issued successfully.
+ * Return: %true if @tunnel is fully activated.
+ *
+ * Note for DP tunnels this returns %true only once the DPRX capabilities
+ * read has been issued successfully. For other tunnels, this function
+ * returns %true pretty much once tb_tunnel_activate() returns successfully.
  */
 static inline bool tb_tunnel_is_active(const struct tb_tunnel *tunnel)
 {
@@ -191,6 +197,29 @@ static inline bool tb_tunnel_direction_downstream(const struct tb_tunnel *tunnel
 	return tb_port_path_direction_downstream(tunnel->src_port,
 						 tunnel->dst_port);
 }
+
+/**
+ * enum tb_tunnel_event - Tunnel related events
+ * @TB_TUNNEL_ACTIVATED: A tunnel was activated
+ * @TB_TUNNEL_CHANGED: There is a tunneling change in the domain. Includes
+ *		       full %TUNNEL_DETAILS if the tunnel in question is known
+ *		       (ICM does not provide that information).
+ * @TB_TUNNEL_DEACTIVATED: A tunnel was torn down
+ * @TB_TUNNEL_LOW_BANDWIDTH: Tunnel bandwidth is not optimal
+ * @TB_TUNNEL_NO_BANDWIDTH: There is not enough bandwidth for a tunnel
+ */
+enum tb_tunnel_event {
+	TB_TUNNEL_ACTIVATED,
+	TB_TUNNEL_CHANGED,
+	TB_TUNNEL_DEACTIVATED,
+	TB_TUNNEL_LOW_BANDWIDTH,
+	TB_TUNNEL_NO_BANDWIDTH,
+};
+
+void tb_tunnel_event(struct tb *tb, enum tb_tunnel_event event,
+		     enum tb_tunnel_type type,
+		     const struct tb_port *src_port,
+		     const struct tb_port *dst_port);
 
 const char *tb_tunnel_type_name(const struct tb_tunnel *tunnel);
 

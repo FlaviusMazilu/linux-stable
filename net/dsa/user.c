@@ -13,6 +13,7 @@
 #include <linux/of_net.h>
 #include <linux/of_mdio.h>
 #include <linux/mdio.h>
+#include <net/netdev_lock.h>
 #include <net/rtnetlink.h>
 #include <net/pkt_cls.h>
 #include <net/selftests.h>
@@ -147,7 +148,7 @@ static int dsa_user_schedule_standalone_work(struct net_device *dev,
 {
 	struct dsa_standalone_event_work *standalone_work;
 
-	standalone_work = kzalloc(sizeof(*standalone_work), GFP_ATOMIC);
+	standalone_work = kzalloc_obj(*standalone_work, GFP_ATOMIC);
 	if (!standalone_work)
 		return -ENOMEM;
 
@@ -578,20 +579,6 @@ dsa_user_fdb_dump(struct sk_buff *skb, struct netlink_callback *cb,
 static int dsa_user_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	struct dsa_user_priv *p = netdev_priv(dev);
-	struct dsa_switch *ds = p->dp->ds;
-	int port = p->dp->index;
-
-	/* Pass through to switch driver if it supports timestamping */
-	switch (cmd) {
-	case SIOCGHWTSTAMP:
-		if (ds->ops->port_hwtstamp_get)
-			return ds->ops->port_hwtstamp_get(ds, port, ifr);
-		break;
-	case SIOCSHWTSTAMP:
-		if (ds->ops->port_hwtstamp_set)
-			return ds->ops->port_hwtstamp_set(ds, port, ifr);
-		break;
-	}
 
 	return phylink_mii_ioctl(p->dp->pl, ifr, cmd);
 }
@@ -897,7 +884,7 @@ static void dsa_skb_tx_timestamp(struct dsa_user_priv *p,
 {
 	struct dsa_switch *ds = p->dp->ds;
 
-	if (!(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP))
+	if (!(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP_NOBPF))
 		return;
 
 	if (!ds->ops->port_txtstamp)
@@ -949,13 +936,12 @@ static netdev_tx_t dsa_user_xmit(struct sk_buff *skb, struct net_device *dev)
 		eth_skb_pad(skb);
 
 	/* Transmit function may have to reallocate the original SKB,
-	 * in which case it must have freed it. Only free it here on error.
+	 * in which case it must have freed it. Taggers will drop the
+	 * passed skb on error.
 	 */
 	nskb = p->xmit(skb, dev);
-	if (!nskb) {
-		kfree_skb(skb);
+	if (!nskb)
 		return NETDEV_TX_OK;
-	}
 
 	return dsa_enqueue_skb(nskb, dev);
 }
@@ -1243,16 +1229,25 @@ static int dsa_user_set_eee(struct net_device *dev, struct ethtool_keee *e)
 	if (!ds->ops->support_eee || !ds->ops->support_eee(ds, dp->index))
 		return -EOPNOTSUPP;
 
-	/* Port's PHY and MAC both need to be EEE capable */
-	if (!dev->phydev)
-		return -ENODEV;
+	/* If the port is using phylink managed EEE, then an unimplemented
+	 * set_mac_eee() is permissible.
+	 */
+	if (!phylink_mac_implements_lpi(ds->phylink_mac_ops)) {
+		/* Port's PHY and MAC both need to be EEE capable */
+		if (!dev->phydev)
+			return -ENODEV;
 
-	if (!ds->ops->set_mac_eee)
-		return -EOPNOTSUPP;
+		if (!ds->ops->set_mac_eee)
+			return -EOPNOTSUPP;
 
-	ret = ds->ops->set_mac_eee(ds, dp->index, e);
-	if (ret)
-		return ret;
+		ret = ds->ops->set_mac_eee(ds, dp->index, e);
+		if (ret)
+			return ret;
+	} else if (ds->ops->set_mac_eee) {
+		ret = ds->ops->set_mac_eee(ds, dp->index, e);
+		if (ret)
+			return ret;
+	}
 
 	return phylink_ethtool_set_eee(dp->pl, e);
 }
@@ -1323,7 +1318,7 @@ static int dsa_user_netpoll_setup(struct net_device *dev)
 	struct netpoll *netpoll;
 	int err = 0;
 
-	netpoll = kzalloc(sizeof(*netpoll), GFP_KERNEL);
+	netpoll = kzalloc_obj(*netpoll);
 	if (!netpoll)
 		return -ENOMEM;
 
@@ -1435,7 +1430,7 @@ dsa_user_add_cls_matchall_mirred(struct net_device *dev,
 		return -EOPNOTSUPP;
 	}
 
-	mall_tc_entry = kzalloc(sizeof(*mall_tc_entry), GFP_KERNEL);
+	mall_tc_entry = kzalloc_obj(*mall_tc_entry);
 	if (!mall_tc_entry)
 		return -ENOMEM;
 
@@ -1464,8 +1459,8 @@ dsa_user_add_cls_matchall_police(struct net_device *dev,
 	struct netlink_ext_ack *extack = cls->common.extack;
 	struct dsa_port *dp = dsa_user_to_port(dev);
 	struct dsa_user_priv *p = netdev_priv(dev);
-	struct dsa_mall_policer_tc_entry *policer;
 	struct dsa_mall_tc_entry *mall_tc_entry;
+	struct flow_action_police *policer;
 	struct dsa_switch *ds = dp->ds;
 	struct flow_action_entry *act;
 	int err;
@@ -1495,17 +1490,16 @@ dsa_user_add_cls_matchall_police(struct net_device *dev,
 
 	act = &cls->rule->action.entries[0];
 
-	mall_tc_entry = kzalloc(sizeof(*mall_tc_entry), GFP_KERNEL);
+	mall_tc_entry = kzalloc_obj(*mall_tc_entry);
 	if (!mall_tc_entry)
 		return -ENOMEM;
 
 	mall_tc_entry->cookie = cls->cookie;
 	mall_tc_entry->type = DSA_PORT_MALL_POLICER;
 	policer = &mall_tc_entry->policer;
-	policer->rate_bytes_per_sec = act->police.rate_bytes_ps;
-	policer->burst = act->police.burst;
+	*policer = act->police;
 
-	err = ds->ops->port_policer_add(ds, dp->index, policer);
+	err = ds->ops->port_policer_add(ds, dp->index, policer, extack);
 	if (err) {
 		kfree(mall_tc_entry);
 		return err;
@@ -1829,7 +1823,7 @@ static int dsa_user_vlan_rx_add_vid(struct net_device *dev, __be16 proto,
 	    !dsa_switch_supports_mc_filtering(ds))
 		return 0;
 
-	v = kzalloc(sizeof(*v), GFP_KERNEL);
+	v = kzalloc_obj(*v);
 	if (!v) {
 		ret = -ENOMEM;
 		goto rollback;
@@ -2076,7 +2070,7 @@ static void dsa_bridge_mtu_normalization(struct dsa_port *dp)
 			if (min_mtu > user->mtu)
 				min_mtu = user->mtu;
 
-			hw_port = kzalloc(sizeof(*hw_port), GFP_KERNEL);
+			hw_port = kzalloc_obj(*hw_port);
 			if (!hw_port)
 				goto out;
 
@@ -2553,16 +2547,40 @@ static int dsa_user_fill_forward_path(struct net_device_path_ctx *ctx,
 				      struct net_device_path *path)
 {
 	struct dsa_port *dp = dsa_user_to_port(ctx->dev);
-	struct net_device *conduit = dsa_port_to_conduit(dp);
 	struct dsa_port *cpu_dp = dp->cpu_dp;
 
 	path->dev = ctx->dev;
 	path->type = DEV_PATH_DSA;
 	path->dsa.proto = cpu_dp->tag_ops->proto;
 	path->dsa.port = dp->index;
-	ctx->dev = conduit;
+	ctx->dev = NULL;
 
 	return 0;
+}
+
+static int dsa_user_hwtstamp_get(struct net_device *dev,
+				 struct kernel_hwtstamp_config *cfg)
+{
+	struct dsa_port *dp = dsa_user_to_port(dev);
+	struct dsa_switch *ds = dp->ds;
+
+	if (!ds->ops->port_hwtstamp_get)
+		return -EOPNOTSUPP;
+
+	return ds->ops->port_hwtstamp_get(ds, dp->index, cfg);
+}
+
+static int dsa_user_hwtstamp_set(struct net_device *dev,
+				 struct kernel_hwtstamp_config *cfg,
+				 struct netlink_ext_ack *extack)
+{
+	struct dsa_port *dp = dsa_user_to_port(dev);
+	struct dsa_switch *ds = dp->ds;
+
+	if (!ds->ops->port_hwtstamp_set)
+		return -EOPNOTSUPP;
+
+	return ds->ops->port_hwtstamp_set(ds, dp->index, cfg, extack);
 }
 
 static const struct net_device_ops dsa_user_netdev_ops = {
@@ -2586,6 +2604,8 @@ static const struct net_device_ops dsa_user_netdev_ops = {
 	.ndo_vlan_rx_kill_vid	= dsa_user_vlan_rx_kill_vid,
 	.ndo_change_mtu		= dsa_user_change_mtu,
 	.ndo_fill_forward_path	= dsa_user_fill_forward_path,
+	.ndo_hwtstamp_get	= dsa_user_hwtstamp_get,
+	.ndo_hwtstamp_set	= dsa_user_hwtstamp_set,
 };
 
 static const struct device_type dsa_type = {
@@ -2759,7 +2779,7 @@ int dsa_user_create(struct dsa_port *port)
 	user_dev = alloc_netdev_mqs(sizeof(struct dsa_user_priv), name,
 				    assign_type, ether_setup,
 				    ds->num_tx_queues, 1);
-	if (user_dev == NULL)
+	if (!user_dev)
 		return -ENOMEM;
 
 	user_dev->rtnl_link_ops = &dsa_link_ops;
@@ -3579,10 +3599,24 @@ static int dsa_user_netdevice_event(struct notifier_block *nb,
 			if (dp->cpu_dp != cpu_dp)
 				continue;
 
-			list_add(&dp->user->close_list, &close_list);
+			if (!(dp->user->flags & IFF_UP))
+				continue;
+
+			list_add_tail(&dp->user->close_list, &close_list);
+			netdev_lock_ops(dp->user);
 		}
 
-		dev_close_many(&close_list, true);
+		netif_close_many(&close_list, false);
+
+		while (!list_empty(&close_list)) {
+			struct net_device *user_dev;
+
+			user_dev = list_first_entry(&close_list,
+						    struct net_device,
+						    close_list);
+			netdev_unlock_ops(user_dev);
+			list_del_init(&user_dev->close_list);
+		}
 
 		return NOTIFY_OK;
 	}
@@ -3717,7 +3751,7 @@ static int dsa_user_fdb_event(struct net_device *dev,
 			return -EOPNOTSUPP;
 	}
 
-	switchdev_work = kzalloc(sizeof(*switchdev_work), GFP_ATOMIC);
+	switchdev_work = kzalloc_obj(*switchdev_work, GFP_ATOMIC);
 	if (!switchdev_work)
 		return -ENOMEM;
 

@@ -43,6 +43,7 @@ extern void rtnl_lock(void);
 extern void rtnl_unlock(void);
 extern int rtnl_trylock(void);
 extern int rtnl_is_locked(void);
+extern int rtnl_lock_interruptible(void);
 extern int rtnl_lock_killable(void);
 extern bool refcount_dec_and_rtnl_lock(refcount_t *r);
 
@@ -114,6 +115,10 @@ bool rtnl_net_is_locked(struct net *net);
 
 bool lockdep_rtnl_net_is_held(struct net *net);
 
+void rtnl_net_queue_work(struct net *net);
+void rtnl_net_flush_workqueue(void);
+void rtnl_net_work_func(struct work_struct *work);
+
 #define rcu_dereference_rtnl_net(net, p)				\
 	rcu_dereference_check(p, lockdep_rtnl_net_is_held(net))
 #define rtnl_net_dereference(net, p)					\
@@ -149,6 +154,10 @@ static inline void ASSERT_RTNL_NET(struct net *net)
 	ASSERT_RTNL();
 }
 
+static inline void rtnl_net_flush_workqueue(void)
+{
+}
+
 #define rcu_dereference_rtnl_net(net, p)		\
 	rcu_dereference_rtnl(p)
 #define rtnl_net_dereference(net, p)			\
@@ -177,7 +186,12 @@ void net_dec_ingress_queue(void);
 #ifdef CONFIG_NET_EGRESS
 void net_inc_egress_queue(void);
 void net_dec_egress_queue(void);
-void netdev_xmit_skip_txqueue(bool skip);
+bool netdev_xmit_skip_txqueue(bool skip);
+#else
+static inline bool netdev_xmit_skip_txqueue(bool skip)
+{
+	return false;
+}
 #endif
 
 void rtnetlink_init(void);
@@ -239,6 +253,6 @@ rtnl_notify_needed(const struct net *net, u16 nlflags, u32 group)
 	return (nlflags & NLM_F_ECHO) || rtnl_has_listeners(net, group);
 }
 
-void netdev_set_operstate(struct net_device *dev, int newstate);
+void netif_set_operstate(struct net_device *dev, int newstate);
 
 #endif	/* __LINUX_RTNETLINK_H */
